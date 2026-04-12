@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1" />
     <meta name="theme-color" content="#0a0a0f" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -13,129 +13,140 @@
     <title>MusiMe</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
-      rel="stylesheet"
-    />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <!-- ─── Tab Views ─── -->
-    <div id="view-search" class="view active">
-      <header class="view-header">
-        <h1>Discover</h1>
-        <button id="install-btn" class="pill-btn hidden" type="button">Install</button>
-      </header>
-      <form id="search-form" class="search-bar" action="javascript:void(0)">
-        <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-        <input id="search-query" type="search" placeholder="Search songs, artists..." required />
-      </form>
-      <div id="download-queue" class="download-queue hidden"></div>
-      <div id="search-results" class="search-results">
-        <div class="empty-state">
-          <div class="empty-icon">&#9835;</div>
-          <p>Search for any song or artist</p>
-          <p class="hint">Full songs from JioSaavn, Internet Archive & more</p>
-        </div>
-      </div>
+
+    <!-- ═══ Splash Screen ═══ -->
+    <div id="splash" class="splash">
+      <img class="splash-icon" src="icons/icon-192.svg" alt="MusiMe" />
+      <p class="splash-name">MusiMe</p>
+      <p class="splash-sub">Your private sound room</p>
     </div>
 
-    <div id="view-library" class="view">
-      <header class="view-header">
-        <h1>Library</h1>
-        <div class="header-actions">
-          <button id="favorites-toggle" class="pill-btn" type="button">
-            <span class="fav-icon">&#9825;</span> Favorites
-          </button>
-        </div>
-      </header>
-      <div class="library-tools">
-        <div class="search-bar small">
+    <!-- ═══ App Shell ═══ -->
+    <div class="app-shell">
+
+      <!-- ── Discover ── -->
+      <div id="view-search" class="view active">
+        <header class="view-header">
+          <h1>Discover</h1>
+          <button id="install-btn" class="pill-btn hidden" type="button">Install</button>
+        </header>
+        <form id="search-form" class="search-bar" action="javascript:void(0)">
           <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-          <input id="search-input" type="search" placeholder="Filter library..." />
-        </div>
-        <select id="sort-select">
-          <option value="newest">Newest</option>
-          <option value="title">Title</option>
-          <option value="artist">Artist</option>
-          <option value="recent">Recent</option>
-          <option value="playlist">Playlist</option>
-        </select>
-      </div>
-      <div id="recently-played" class="recently-played hidden"></div>
-      <div id="songs" class="songs"></div>
-    </div>
-
-    <div id="view-playlists" class="view">
-      <header class="view-header">
-        <h1>Playlists</h1>
-      </header>
-      <form id="playlist-form" class="create-playlist-form" action="javascript:void(0)">
-        <input id="playlist-name" type="text" placeholder="New playlist name..." required />
-        <button type="submit" class="pill-btn accent">Create</button>
-      </form>
-      <div id="playlists" class="playlist-grid"></div>
-      <div id="playlist-admin" class="playlist-admin hidden">
-        <p id="playlist-active-label" class="admin-label"></p>
-        <div class="admin-actions">
-          <input id="rename-playlist" type="text" placeholder="Rename..." />
-          <button id="rename-playlist-btn" type="button" class="pill-btn">Rename</button>
-          <button id="delete-playlist-btn" type="button" class="pill-btn danger">Delete</button>
-        </div>
-      </div>
-    </div>
-
-    <div id="view-settings" class="view">
-      <header class="view-header">
-        <h1>Settings</h1>
-      </header>
-      <section class="settings-section">
-        <h3>Add from URL</h3>
-        <form id="url-form" class="settings-form" action="javascript:void(0)">
-          <input id="song-url" type="url" placeholder="https://.../track.mp3" required />
-          <input id="song-title" type="text" placeholder="Song title" required />
-          <input id="song-artist" type="text" placeholder="Artist" />
-          <button class="pill-btn accent wide" type="submit">Download & Save</button>
+          <input id="search-query" type="search" placeholder="Search songs, artists..." required />
         </form>
-      </section>
-      <section class="settings-section">
-        <h3>Import from device</h3>
-        <label class="file-drop" for="file-input">
-          <input id="file-input" type="file" accept="audio/*" multiple />
-          <span>Tap to select audio files</span>
-        </label>
-      </section>
-      <section class="settings-section">
-        <h3>Backup & Restore</h3>
-        <div class="backup-row">
-          <button id="export-backup" type="button" class="pill-btn wide">Export Backup</button>
-          <label for="import-backup-file" class="pill-btn wide fake-btn">Import Backup</label>
-          <input id="import-backup-file" type="file" accept="application/json" class="hidden" />
+        <div id="download-queue" class="download-queue hidden"></div>
+        <div id="search-results" class="search-results">
+          <div class="empty-state">
+            <div class="empty-icon">&#9835;</div>
+            <p>Search for any song or artist</p>
+            <p class="hint">Full songs from JioSaavn, Internet Archive &amp; more</p>
+          </div>
         </div>
-      </section>
-      <section class="settings-section">
-        <h3>Storage</h3>
-        <div id="storage-info" class="storage-info">
-          <div class="storage-bar"><div id="storage-fill" class="storage-fill"></div></div>
-          <p id="storage-text" class="hint">Calculating...</p>
-        </div>
-      </section>
-      <div id="pwa-install-banner" class="pwa-banner hidden">
-        <p><strong>Add to Home Screen</strong> for reliable offline playback. Browser tabs can lose stored songs after inactivity.</p>
-        <button id="dismiss-banner" class="pill-btn" type="button">Got it</button>
       </div>
-    </div>
 
-    <!-- ─── Now Playing (full-screen overlay) ─── -->
+      <!-- ── Library ── -->
+      <div id="view-library" class="view">
+        <header class="view-header">
+          <h1>Library</h1>
+          <div class="header-actions">
+            <button id="favorites-toggle" class="pill-btn" type="button">
+              <span class="fav-icon">&#9825;</span> Favorites
+            </button>
+          </div>
+        </header>
+        <div class="library-tools">
+          <div class="search-bar small">
+            <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+            <input id="search-input" type="search" placeholder="Filter library..." />
+          </div>
+          <select id="sort-select">
+            <option value="newest">Newest</option>
+            <option value="title">Title</option>
+            <option value="artist">Artist</option>
+            <option value="recent">Recent</option>
+            <option value="playlist">Playlist</option>
+          </select>
+        </div>
+        <div id="recently-played" class="recently-played hidden"></div>
+        <div id="songs" class="songs"></div>
+      </div>
+
+      <!-- ── Playlists ── -->
+      <div id="view-playlists" class="view">
+        <header class="view-header">
+          <h1>Playlists</h1>
+        </header>
+        <form id="playlist-form" class="create-playlist-form" action="javascript:void(0)">
+          <input id="playlist-name" type="text" placeholder="New playlist name..." required />
+          <button type="submit" class="pill-btn accent">Create</button>
+        </form>
+        <div id="playlists" class="playlist-grid"></div>
+        <div id="playlist-admin" class="playlist-admin hidden">
+          <p id="playlist-active-label" class="admin-label"></p>
+          <div class="admin-actions">
+            <input id="rename-playlist" type="text" placeholder="Rename..." />
+            <button id="rename-playlist-btn" type="button" class="pill-btn">Rename</button>
+            <button id="delete-playlist-btn" type="button" class="pill-btn danger">Delete</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Settings ── -->
+      <div id="view-settings" class="view">
+        <header class="view-header">
+          <h1>Settings</h1>
+        </header>
+        <section class="settings-section">
+          <h3>Add from URL</h3>
+          <form id="url-form" class="settings-form" action="javascript:void(0)">
+            <input id="song-url" type="url" placeholder="https://.../track.mp3" required />
+            <input id="song-title" type="text" placeholder="Song title" required />
+            <input id="song-artist" type="text" placeholder="Artist" />
+            <button class="pill-btn accent wide" type="submit">Download &amp; Save</button>
+          </form>
+        </section>
+        <section class="settings-section">
+          <h3>Import from device</h3>
+          <label class="file-drop" for="file-input">
+            <input id="file-input" type="file" accept="audio/*" multiple />
+            <span>Tap to select audio files</span>
+          </label>
+        </section>
+        <section class="settings-section">
+          <h3>Backup &amp; Restore</h3>
+          <div class="backup-row">
+            <button id="export-backup" type="button" class="pill-btn wide">Export Backup</button>
+            <label for="import-backup-file" class="pill-btn wide fake-btn">Import Backup</label>
+            <input id="import-backup-file" type="file" accept="application/json" class="hidden" />
+          </div>
+        </section>
+        <section class="settings-section">
+          <h3>Storage</h3>
+          <div id="storage-info" class="storage-info">
+            <div class="storage-bar"><div id="storage-fill" class="storage-fill"></div></div>
+            <p id="storage-text" class="hint">Calculating...</p>
+          </div>
+        </section>
+        <div id="pwa-install-banner" class="pwa-banner hidden">
+          <p><strong>Add to Home Screen</strong> for reliable offline playback. Browser tabs can lose stored songs after inactivity.</p>
+          <button id="dismiss-banner" class="pill-btn" type="button">Got it</button>
+        </div>
+      </div>
+
+    </div><!-- /app-shell -->
+
+    <!-- ═══ Now Playing ═══ -->
     <div id="now-playing" class="now-playing hidden">
       <button id="np-close" class="np-close" type="button">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
       </button>
       <div class="np-artwork-wrap">
         <img id="np-artwork" class="np-artwork" src="" alt="" />
-        <div id="np-artwork-placeholder" class="np-artwork placeholder">
-          <span>&#9835;</span>
-        </div>
+        <div id="np-artwork-placeholder" class="np-artwork placeholder"><span>&#9835;</span></div>
       </div>
       <div class="np-info">
         <p id="np-title" class="np-title">No song selected</p>
@@ -162,26 +173,24 @@
       </div>
     </div>
 
-    <!-- ─── Mini Player ─── -->
+    <!-- ═══ Mini Player ═══ -->
     <div id="mini-player" class="mini-player hidden">
       <div id="mini-progress" class="mini-progress"></div>
       <div class="mini-content" id="mini-content">
         <img id="mini-art" class="mini-art" src="" alt="" />
-        <div id="mini-art-placeholder" class="mini-art placeholder">
-          <span>&#9835;</span>
-        </div>
+        <div id="mini-art-placeholder" class="mini-art placeholder"><span>&#9835;</span></div>
         <div class="mini-info">
           <p id="mini-title" class="mini-title">No song</p>
           <p id="mini-artist" class="mini-artist">-</p>
         </div>
         <button id="mini-play" class="mini-play-btn" type="button">
-          <svg id="mini-play-icon" viewBox="0 0 24 24" fill="currentColor" width="22" height="22"><path d="M8 5v14l11-7z"/></svg>
-          <svg id="mini-pause-icon" class="hidden" viewBox="0 0 24 24" fill="currentColor" width="22" height="22"><path d="M6 19h4V5H6zm8-14v14h4V5z"/></svg>
+          <svg id="mini-play-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+          <svg id="mini-pause-icon" class="hidden" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6zm8-14v14h4V5z"/></svg>
         </button>
       </div>
     </div>
 
-    <!-- ─── Tab Bar ─── -->
+    <!-- ═══ Tab Bar ═══ -->
     <nav class="tab-bar">
       <button class="tab active" data-view="view-search" type="button">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
