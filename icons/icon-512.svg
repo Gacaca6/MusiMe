@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="MusiMe icon">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fde18b" />
+      <stop offset="100%" stop-color="#55cbe8" />
+    </linearGradient>
+  </defs>
+  <rect x="24" y="24" width="464" height="464" rx="128" fill="#1a1d27" />
+  <circle cx="190" cy="338" r="54" fill="url(#g)" />
+  <circle cx="335" cy="289" r="47" fill="url(#g)" />
+  <path d="M225 335V153l133-38v171" fill="none" stroke="url(#g)" stroke-linecap="round" stroke-linejoin="round" stroke-width="30" />
+</svg>
