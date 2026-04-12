@@ -200,10 +200,18 @@ function loadMeta() {
 }
 
 /* ── Helpers ── */
+let toastTimer = null;
 function showToast(text) {
+  if (toastTimer) clearTimeout(toastTimer);
+  nodes.toast.classList.remove("show");
+  // Force reflow so the remove/add triggers the transition again
+  void nodes.toast.offsetWidth;
   nodes.toast.textContent = text;
   nodes.toast.classList.add("show");
-  setTimeout(() => nodes.toast.classList.remove("show"), 1800);
+  toastTimer = setTimeout(() => {
+    nodes.toast.classList.remove("show");
+    toastTimer = null;
+  }, 1800);
 }
 
 function slugify(t) {
