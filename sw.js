@@ -1,4 +1,4 @@
-const CACHE_NAME = "musime-static-v3";
+const CACHE_NAME = "musime-static-v4";
 const STATIC_ASSETS = [
   "./",
   "./index.html",
@@ -9,11 +9,15 @@ const STATIC_ASSETS = [
   "./icons/icon-512.svg"
 ];
 
+// Pre-cache all app files on install
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(STATIC_ASSETS)));
+  event.waitUntil(
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(STATIC_ASSETS))
+  );
   self.skipWaiting();
 });
 
+// Clean up old caches on activate
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
@@ -28,10 +32,12 @@ self.addEventListener("fetch", (event) => {
 
   const url = new URL(event.request.url);
 
-  // Never intercept cross-origin requests (APIs, CDNs, etc.)
+  // NEVER intercept cross-origin requests (APIs, CDNs, etc.)
+  // Artwork + audio are stored in IndexedDB, not the SW cache
   if (url.origin !== self.location.origin) return;
 
-  // Network-first for app files so updates are picked up immediately
+  // For app shell files: network-first with cache fallback
+  // This ensures the app ALWAYS loads, even without internet
   event.respondWith(
     fetch(event.request)
       .then((response) => {

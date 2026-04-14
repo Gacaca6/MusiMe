@@ -3,7 +3,7 @@ const STORE_NAME = "songs";
 const SONGS_KEY = "musime-songs-meta";
 const PLAYLISTS_KEY = "musime-playlists";
 const PLAYLIST_ORDERS_KEY = "musime-playlist-orders";
-const BACKUP_VERSION = 2;
+const BACKUP_VERSION = 3;
 const SAAVN_API = "https://jiosavan-api2.vercel.app/api";
 
 let songs = [];
@@ -21,13 +21,16 @@ let currentSongId = null;
 let isPlaying = false;
 let deferredPrompt = null;
 
-/* ── NEW: Playback queue, shuffle, repeat, sleep ── */
-let userQueue = [];          // User-added "play next" / "add to queue" songs
+/* ── Playback queue, shuffle, repeat, sleep ── */
+let userQueue = [];
 let shuffleOn = false;
-let repeatMode = "off";      // "off" | "all" | "one"
+let repeatMode = "off";
 let sleepTimer = null;
 let sleepEndTime = 0;
 let sleepDisplayInterval = null;
+
+/* ── Artwork cache: songId → blob objectURL (fully offline) ── */
+const artCache = new Map();
 
 /* ── DOM ── */
 const $ = (id) => document.getElementById(id);
@@ -174,6 +177,64 @@ async function clearBlobs() {
   db.close();
 }
 
+/* ══════════════ ARTWORK CACHE (offline-proof) ══════════════ */
+// Store artwork in IndexedDB with key "art-{songId}"
+async function saveArtwork(songId, blob) {
+  await saveBlob(`art-${songId}`, blob);
+}
+async function getArtwork(songId) {
+  return await getBlob(`art-${songId}`);
+}
+async function deleteArtwork(songId) {
+  try { await deleteBlob(`art-${songId}`); } catch {}
+}
+
+// Download artwork from URL and store locally
+async function cacheArtworkFromUrl(songId, url) {
+  if (!url) return;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return;
+    const blob = await res.blob();
+    if (blob.size > 0) {
+      await saveArtwork(songId, blob);
+      // Create object URL for immediate use
+      const objUrl = URL.createObjectURL(blob);
+      artCache.set(songId, objUrl);
+    }
+  } catch {
+    // Artwork download failed (offline or CORS) — not critical
+  }
+}
+
+// Build artCache from IndexedDB on startup
+async function loadAllArtwork() {
+  const entries = await getAllBlobEntries();
+  for (const entry of entries) {
+    if (typeof entry.id === "string" && entry.id.startsWith("art-") && entry.blob) {
+      const songId = entry.id.slice(4); // Remove "art-" prefix
+      const objUrl = URL.createObjectURL(entry.blob);
+      artCache.set(songId, objUrl);
+    }
+  }
+}
+
+// Get the offline-safe artwork URL for a song
+function getArtUrl(song) {
+  if (!song) return "";
+  // Prefer cached local blob URL (works offline)
+  if (artCache.has(song.id)) return artCache.get(song.id);
+  // Fallback to remote URL (only works online)
+  return song.artwork || "";
+}
+
+// Returns HTML for an artwork element — local first, placeholder fallback
+function artHtml(song, className, placeholderClass) {
+  const url = getArtUrl(song);
+  if (url) return `<img class="${className}" src="${url}" alt="" loading="lazy">`;
+  return `<div class="${className} ${placeholderClass || "placeholder"}"><span>&#9835;</span></div>`;
+}
+
 /* ══════════════ METADATA ══════════════ */
 function saveMeta() {
   localStorage.setItem(SONGS_KEY, JSON.stringify(songs));
@@ -316,7 +377,12 @@ async function processQueue() {
       next.state = "downloading"; next.progress = 10; renderQueue();
       try {
         const blob = await fetchAudioBlob(next.result.url, (p) => { next.progress = p; renderQueue(); });
-        await addSong({ title: next.result.title, artist: next.result.artist, source: next.result.source, blob, album: next.result.album || "", artwork: next.result.artwork || "", duration: next.result.duration || 0 });
+        const songId = await addSong({ title: next.result.title, artist: next.result.artist, source: next.result.source, blob, album: next.result.album || "", artwork: next.result.artwork || "", duration: next.result.duration || 0 });
+        // Cache artwork locally for offline use
+        if (next.result.artwork && songId) {
+          await cacheArtworkFromUrl(songId, next.result.artwork);
+          render(); // Re-render with local artwork
+        }
         next.state = "done"; next.progress = 100;
         showToast(next.result.isPreview ? "Preview saved" : "Song saved offline");
       } catch { next.state = "failed"; showToast("Download failed"); }
@@ -345,7 +411,7 @@ async function fetchAudioBlob(url, onProgress) {
   return new Blob(chunks, { type: ct || "audio/mpeg" });
 }
 
-/* ══════════════ RENDER SEARCH RESULTS (with duration) ══════════════ */
+/* ══════════════ RENDER SEARCH RESULTS ══════════════ */
 function renderRemoteResults() {
   nodes.searchResults.innerHTML = "";
   if (!remoteResults.length) {
@@ -354,6 +420,7 @@ function renderRemoteResults() {
   }
   remoteResults.forEach((result) => {
     const row = document.createElement("article"); row.className = "result-item";
+    // Search results use remote URLs (user is online to search)
     const artEl = result.artwork ? `<img class="art" src="${result.artwork}" alt="" loading="lazy">` : `<div class="art placeholder"><span>&#9835;</span></div>`;
     const src = result.source === "jiosaavn" ? "JioSaavn" : result.source === "archive" ? "Archive" : "iTunes";
     const bc = result.isPreview ? "preview" : "full";
@@ -392,7 +459,7 @@ function normalizePlaylistOrders() {
   Object.keys(playlistOrders).forEach((pl) => { if (!playlists.includes(pl)) delete playlistOrders[pl]; });
 }
 
-/* ══════════════ RECENTLY PLAYED (enhanced with artwork) ══════════════ */
+/* ══════════════ RECENTLY PLAYED ══════════════ */
 function renderRecent() {
   const recent = [...songs].filter((s) => s.lastPlayedAt).sort((a, b) => b.lastPlayedAt - a.lastPlayedAt).slice(0, 10);
   nodes.recentlyPlayed.innerHTML = "";
@@ -401,10 +468,7 @@ function renderRecent() {
   recent.forEach((s) => {
     const card = document.createElement("div");
     card.className = "recent-card";
-    const artEl = s.artwork
-      ? `<img class="recent-card-art" src="${s.artwork}" alt="" loading="lazy">`
-      : `<div class="recent-card-art placeholder"><span>&#9835;</span></div>`;
-    card.innerHTML = `${artEl}<span class="recent-card-title">${s.title}</span><span class="recent-card-artist">${s.artist || "Unknown"}</span>`;
+    card.innerHTML = `${artHtml(s, "recent-card-art", "placeholder")}<span class="recent-card-title">${s.title}</span><span class="recent-card-artist">${s.artist || "Unknown"}</span>`;
     card.addEventListener("click", () => playSong(s));
     nodes.recentlyPlayed.append(card);
   });
@@ -424,7 +488,7 @@ function renderPlaylists() {
   else { nodes.playlistAdmin.classList.add("hidden"); nodes.renamePlaylist.value = ""; }
 }
 
-/* ══════════════ RENDER SONGS (with duration + play-next + now-playing highlight) ══════════════ */
+/* ══════════════ RENDER SONGS ══════════════ */
 function renderSongs() {
   const filtered = sortSongs(filterSongs());
   nodes.songs.innerHTML = "";
@@ -432,14 +496,12 @@ function renderSongs() {
   filtered.forEach((song) => {
     const item = document.createElement("article");
     item.className = "song" + (song.id === currentSongId ? " now-playing-song" : "");
-    const artEl = song.artwork ? `<img class="song-art" src="${song.artwork}" alt="" loading="lazy">` : `<div class="song-art placeholder"><span>&#9835;</span></div>`;
     const durText = song.duration > 0 ? formatTime(song.duration) : "";
     const durEl = durText ? `<span class="song-duration">${durText}</span>` : "";
     const playCountText = song.playCount > 0 ? ` &middot; ${song.playCount} play${song.playCount !== 1 ? "s" : ""}` : "";
-    item.innerHTML = `${artEl}<div class="song-main"><p class="song-title">${song.title}</p><p class="song-meta">${song.artist || "Unknown"} &middot; ${song.source}${playCountText}</p>${durEl}</div><div class="actions"></div>`;
+    item.innerHTML = `${artHtml(song, "song-art", "placeholder")}<div class="song-main"><p class="song-title">${song.title}</p><p class="song-meta">${song.artist || "Unknown"} &middot; ${song.source}${playCountText}</p>${durEl}</div><div class="actions"></div>`;
     const actions = item.querySelector(".actions");
     actions.append(mkBtn("&#9654;", () => playSong(song)));
-    // Play Next button
     actions.append(mkBtn("&#8631;", () => addToUserQueue(song, true), false, "Play next"));
     const fb = mkBtn(song.favorite ? "&#9829;" : "&#9825;", () => toggleFavorite(song.id));
     if (song.favorite) fb.classList.add("fav-active");
@@ -462,20 +524,11 @@ function mkBtn(html, onClick, danger = false, title = "") {
 }
 function render() { renderPlaylists(); renderRecent(); renderSongs(); }
 
-/* ══════════════ USER QUEUE (Play Next / Add to Queue) ══════════════ */
+/* ══════════════ USER QUEUE ══════════════ */
 function addToUserQueue(song, playNext = false) {
-  // Avoid duplicates
-  if (userQueue.some((s) => s.id === song.id)) {
-    showToast("Already in queue");
-    return;
-  }
-  if (playNext) {
-    userQueue.unshift(song);
-    showToast(`"${song.title}" plays next`);
-  } else {
-    userQueue.push(song);
-    showToast(`Added to queue`);
-  }
+  if (userQueue.some((s) => s.id === song.id)) { showToast("Already in queue"); return; }
+  if (playNext) { userQueue.unshift(song); showToast(`"${song.title}" plays next`); }
+  else { userQueue.push(song); showToast(`Added to queue`); }
   renderNpQueue();
 }
 
@@ -497,11 +550,8 @@ function renderNpQueue() {
   }
   list.slice(0, 10).forEach((song, i) => {
     const row = document.createElement("div"); row.className = "queue-song";
-    const artEl = song.artwork
-      ? `<img class="queue-song-art" src="${song.artwork}" alt="" loading="lazy">`
-      : `<div class="queue-song-art placeholder"><span>&#9835;</span></div>`;
     const isUserQueued = i < userQueue.length;
-    row.innerHTML = `${artEl}<div class="queue-song-info"><p class="queue-song-title">${song.title}</p><p class="queue-song-artist">${song.artist || "Unknown"}</p></div>`;
+    row.innerHTML = `${artHtml(song, "queue-song-art", "placeholder")}<div class="queue-song-info"><p class="queue-song-title">${song.title}</p><p class="queue-song-artist">${song.artist || "Unknown"}</p></div>`;
     if (isUserQueued) {
       const removeBtn = document.createElement("button");
       removeBtn.className = "queue-song-remove";
@@ -515,7 +565,6 @@ function renderNpQueue() {
 }
 
 function getUpcomingList() {
-  // User queue first, then natural playlist order
   const natural = getPlaylistUpcoming();
   return [...userQueue, ...natural];
 }
@@ -525,7 +574,6 @@ function getPlaylistUpcoming() {
   if (!list.length) return [];
   const idx = list.findIndex((s) => s.id === currentSongId);
   if (idx < 0) return list.slice(0, 5);
-  // Songs after current
   const after = list.slice(idx + 1);
   const before = list.slice(0, idx);
   return [...after, ...before].slice(0, 8);
@@ -541,7 +589,6 @@ nodes.queueClear.addEventListener("click", () => {
 function getPlaylist() {
   const list = sortSongs(filterSongs());
   if (!shuffleOn) return list;
-  // Fisher-Yates shuffle, but keep current song at its position
   const shuffled = [...list];
   for (let i = shuffled.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -558,39 +605,41 @@ async function playSong(song) {
   nodes.audio.src = currentObjectUrl;
   currentSongId = song.id;
 
+  const localArt = getArtUrl(song);
+
   // Mini player
   nodes.miniPlayer.classList.remove("hidden");
   nodes.miniTitle.textContent = song.title;
   nodes.miniArtist.textContent = song.artist || "Unknown";
-  if (song.artwork) { nodes.miniArt.src = song.artwork; nodes.miniArt.classList.remove("hidden"); nodes.miniArtPlaceholder.classList.add("hidden"); }
+  if (localArt) { nodes.miniArt.src = localArt; nodes.miniArt.classList.remove("hidden"); nodes.miniArtPlaceholder.classList.add("hidden"); }
   else { nodes.miniArt.classList.add("hidden"); nodes.miniArtPlaceholder.classList.remove("hidden"); }
 
   // Now playing
   nodes.npTitle.textContent = song.title;
   nodes.npArtist.textContent = song.artist || "Unknown";
-  if (song.artwork) { nodes.npArtwork.src = song.artwork; nodes.npArtwork.classList.remove("hidden"); nodes.npArtworkPlaceholder.classList.add("hidden"); }
+  if (localArt) { nodes.npArtwork.src = localArt; nodes.npArtwork.classList.remove("hidden"); nodes.npArtworkPlaceholder.classList.add("hidden"); }
   else { nodes.npArtwork.classList.add("hidden"); nodes.npArtworkPlaceholder.classList.remove("hidden"); }
 
   // Track play
   const ref = songs.find((s) => s.id === song.id);
   if (ref) { ref.lastPlayedAt = Date.now(); ref.playCount = (ref.playCount || 0) + 1; saveMeta(); renderRecent(); renderSongs(); }
 
-  // Media Session
-  updateMediaSession(song);
-  // Update queue display
+  // Media Session — use local art for lock screen too
+  updateMediaSession(song, localArt);
   renderNpQueue();
 
   try { await nodes.audio.play(); setPlayingState(true); }
   catch { showToast("Tap play to start"); }
 }
 
-function updateMediaSession(song) {
+function updateMediaSession(song, localArt) {
   if (!("mediaSession" in navigator)) return;
+  const artSrc = localArt || song.artwork || "";
   const artwork = [];
-  if (song.artwork) {
-    artwork.push({ src: song.artwork, sizes: "96x96", type: "image/jpeg" });
-    artwork.push({ src: song.artwork, sizes: "256x256", type: "image/jpeg" });
-    artwork.push({ src: song.artwork, sizes: "512x512", type: "image/jpeg" });
+  if (artSrc) {
+    artwork.push({ src: artSrc, sizes: "96x96", type: "image/jpeg" });
+    artwork.push({ src: artSrc, sizes: "256x256", type: "image/jpeg" });
+    artwork.push({ src: artSrc, sizes: "512x512", type: "image/jpeg" });
   }
   navigator.mediaSession.metadata = new MediaMetadata({
     title: song.title,
@@ -635,35 +684,20 @@ function togglePlayPause() {
 }
 
 function playNext(direction = 1) {
-  // If user queue has songs and going forward, play from queue
   if (direction === 1 && userQueue.length > 0) {
     const next = userQueue.shift();
     renderNpQueue();
     if (next) { playSong(next); return; }
   }
-
   const list = getPlaylist();
   if (!list.length) return;
-
   if (shuffleOn && direction === 1) {
-    // Pick a random song that isn't the current one
     const others = list.filter((s) => s.id !== currentSongId);
-    if (others.length > 0) {
-      const pick = others[Math.floor(Math.random() * others.length)];
-      playSong(pick);
-      return;
-    }
+    if (others.length > 0) { playSong(others[Math.floor(Math.random() * others.length)]); return; }
   }
-
   const idx = list.findIndex((s) => s.id === currentSongId);
   const nextIdx = (idx + direction + list.length) % list.length;
-
-  // If we've gone past the end and repeat is off, stop
-  if (direction === 1 && nextIdx === 0 && repeatMode === "off" && !shuffleOn) {
-    setPlayingState(false);
-    return;
-  }
-
+  if (direction === 1 && nextIdx === 0 && repeatMode === "off" && !shuffleOn) { setPlayingState(false); return; }
   const next = list[nextIdx];
   if (next) playSong(next);
 }
@@ -672,12 +706,7 @@ function playNext(direction = 1) {
 nodes.audio.addEventListener("play", () => setPlayingState(true));
 nodes.audio.addEventListener("pause", () => setPlayingState(false));
 nodes.audio.addEventListener("ended", () => {
-  if (repeatMode === "one") {
-    // Replay the same song
-    nodes.audio.currentTime = 0;
-    nodes.audio.play();
-    return;
-  }
+  if (repeatMode === "one") { nodes.audio.currentTime = 0; nodes.audio.play(); return; }
   playNext(1);
 });
 nodes.audio.addEventListener("timeupdate", () => {
@@ -690,8 +719,6 @@ nodes.audio.addEventListener("timeupdate", () => {
   nodes.npDuration.textContent = formatTime(duration);
   updatePositionState();
 });
-
-// Save duration when audio loads metadata
 nodes.audio.addEventListener("loadedmetadata", () => {
   if (currentSongId && nodes.audio.duration) {
     const ref = songs.find((s) => s.id === currentSongId);
@@ -722,57 +749,28 @@ nodes.npShuffle.addEventListener("click", () => {
 
 /* ══════════════ REPEAT ══════════════ */
 nodes.npRepeat.addEventListener("click", () => {
-  if (repeatMode === "off") {
-    repeatMode = "all";
-    nodes.npRepeat.classList.add("active");
-    nodes.repeatOneBadge.classList.add("hidden");
-    showToast("Repeat all");
-  } else if (repeatMode === "all") {
-    repeatMode = "one";
-    nodes.npRepeat.classList.add("active");
-    nodes.repeatOneBadge.classList.remove("hidden");
-    showToast("Repeat one");
-  } else {
-    repeatMode = "off";
-    nodes.npRepeat.classList.remove("active");
-    nodes.repeatOneBadge.classList.add("hidden");
-    showToast("Repeat off");
-  }
+  if (repeatMode === "off") { repeatMode = "all"; nodes.npRepeat.classList.add("active"); nodes.repeatOneBadge.classList.add("hidden"); showToast("Repeat all"); }
+  else if (repeatMode === "all") { repeatMode = "one"; nodes.npRepeat.classList.add("active"); nodes.repeatOneBadge.classList.remove("hidden"); showToast("Repeat one"); }
+  else { repeatMode = "off"; nodes.npRepeat.classList.remove("active"); nodes.repeatOneBadge.classList.add("hidden"); showToast("Repeat off"); }
 });
 
 /* ══════════════ SLEEP TIMER ══════════════ */
-nodes.npSleep.addEventListener("click", () => {
-  nodes.sleepMenu.classList.toggle("hidden");
-});
-
+nodes.npSleep.addEventListener("click", () => { nodes.sleepMenu.classList.toggle("hidden"); });
 document.querySelectorAll(".sleep-option").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    const minutes = parseInt(btn.dataset.minutes, 10);
-    startSleepTimer(minutes);
-    nodes.sleepMenu.classList.add("hidden");
-  });
+  btn.addEventListener("click", () => { startSleepTimer(parseInt(btn.dataset.minutes, 10)); nodes.sleepMenu.classList.add("hidden"); });
 });
-
-nodes.sleepCancel.addEventListener("click", () => {
-  cancelSleepTimer();
-});
+nodes.sleepCancel.addEventListener("click", () => { cancelSleepTimer(); });
 
 function startSleepTimer(minutes) {
-  cancelSleepTimer(); // Clear any existing
+  cancelSleepTimer();
   sleepEndTime = Date.now() + minutes * 60 * 1000;
   nodes.npSleep.classList.add("active");
   nodes.sleepIndicator.classList.remove("hidden");
   updateSleepDisplay();
   sleepDisplayInterval = setInterval(updateSleepDisplay, 1000);
-  sleepTimer = setTimeout(() => {
-    nodes.audio.pause();
-    setPlayingState(false);
-    showToast("Sleep timer ended");
-    cancelSleepTimer();
-  }, minutes * 60 * 1000);
+  sleepTimer = setTimeout(() => { nodes.audio.pause(); setPlayingState(false); showToast("Sleep timer ended"); cancelSleepTimer(); }, minutes * 60 * 1000);
   showToast(`Sleep timer: ${minutes} min`);
 }
-
 function cancelSleepTimer() {
   if (sleepTimer) { clearTimeout(sleepTimer); sleepTimer = null; }
   if (sleepDisplayInterval) { clearInterval(sleepDisplayInterval); sleepDisplayInterval = null; }
@@ -780,7 +778,6 @@ function cancelSleepTimer() {
   nodes.npSleep.classList.remove("active");
   nodes.sleepIndicator.classList.add("hidden");
 }
-
 function updateSleepDisplay() {
   const remaining = Math.max(0, sleepEndTime - Date.now());
   if (remaining <= 0) { cancelSleepTimer(); return; }
@@ -803,15 +800,19 @@ function addSongToPlaylist(id) {
 async function removeSong(id) {
   songs = songs.filter((s) => s.id !== id);
   Object.keys(playlistOrders).forEach((pl) => { playlistOrders[pl] = (playlistOrders[pl] || []).filter((sid) => sid !== id); });
-  // Remove from user queue too
   userQueue = userQueue.filter((s) => s.id !== id);
-  await deleteBlob(id); saveMeta(); render(); showToast("Removed");
+  await deleteBlob(id);
+  await deleteArtwork(id);
+  // Revoke artwork object URL
+  if (artCache.has(id)) { URL.revokeObjectURL(artCache.get(id)); artCache.delete(id); }
+  saveMeta(); render(); showToast("Removed");
 }
 async function addSong({ title, artist, source, blob, album = "", artwork = "", duration = 0 }) {
   const id = createId();
   await saveBlob(id, blob);
   songs.unshift({ id, title, artist, source, favorite: false, playlists: [], createdAt: Date.now(), lastPlayedAt: 0, playCount: 0, album, artwork, duration });
   saveMeta(); render(); updateStorageInfo();
+  return id; // Return id so caller can cache artwork
 }
 function moveSongInPlaylist(songId, dir) {
   if (selectedPlaylist === "All songs") return;
@@ -846,8 +847,10 @@ function deleteSelectedPlaylist() {
 /* ══════════════ BACKUP ══════════════ */
 async function blobToDataUrl(blob) { return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(r.error); r.readAsDataURL(blob); }); }
 async function exportBackup() {
-  const entries = await getAllBlobEntries(); const blobs = [];
+  const entries = await getAllBlobEntries();
+  const blobs = [];
   for (const e of entries) blobs.push({ id: e.id, dataUrl: await blobToDataUrl(e.blob) });
+  // blobs now includes both audio (songId) and artwork (art-songId)
   const url = URL.createObjectURL(new Blob([JSON.stringify({ app: "MusiMe", version: BACKUP_VERSION, exportedAt: new Date().toISOString(), songs, playlists, playlistOrders, blobs })], { type: "application/json" }));
   const a = document.createElement("a"); a.href = url; a.download = `musime-backup-${Date.now()}.json`; a.click(); URL.revokeObjectURL(url); showToast("Backup exported");
 }
@@ -855,12 +858,18 @@ async function importBackup(file) {
   const payload = JSON.parse(await file.text());
   if (!payload || payload.app !== "MusiMe" || !Array.isArray(payload.songs)) throw new Error("Invalid");
   await clearBlobs();
+  // Clear artwork cache
+  artCache.forEach((url) => URL.revokeObjectURL(url));
+  artCache.clear();
   for (const e of payload.blobs || []) { if (!e.id || !e.dataUrl) continue; await saveBlob(e.id, await (await fetch(e.dataUrl)).blob()); }
   songs = payload.songs.map((s) => ({ ...s, playlists: Array.isArray(s.playlists) ? s.playlists : [], createdAt: s.createdAt || Date.now(), lastPlayedAt: s.lastPlayedAt || 0, playCount: s.playCount || 0, album: s.album || "", artwork: s.artwork || "", duration: s.duration || 0 }));
   playlists = payload.playlists?.includes("All songs") ? payload.playlists : ["All songs", ...(payload.playlists || [])];
   playlistOrders = payload.playlistOrders || {}; normalizePlaylistOrders();
   selectedPlaylist = "All songs"; favoritesOnly = false; searchQuery = ""; sortMode = "newest";
-  nodes.searchInput.value = ""; nodes.sortSelect.value = "newest"; saveMeta(); render();
+  nodes.searchInput.value = ""; nodes.sortSelect.value = "newest"; saveMeta();
+  // Rebuild artwork cache from imported blobs
+  await loadAllArtwork();
+  render();
 }
 
 /* ══════════════ EVENT LISTENERS ══════════════ */
@@ -903,8 +912,48 @@ function checkPwaBanner() {
 const dismissBtn = $("dismiss-banner");
 if (dismissBtn) dismissBtn.addEventListener("click", () => { $("pwa-install-banner").classList.add("hidden"); localStorage.setItem("musime-pwa-banner-dismissed", "1"); });
 
+/* ══════════════ MIGRATE EXISTING SONGS: cache their artwork ══════════════ */
+async function migrateArtwork() {
+  // For every song that has a remote artwork URL but no cached art blob,
+  // try to download and cache it. Only runs when online.
+  if (!navigator.onLine) return;
+  let migrated = 0;
+  for (const song of songs) {
+    if (!song.artwork) continue;  // No artwork to cache
+    if (artCache.has(song.id)) continue;  // Already cached
+    try {
+      await cacheArtworkFromUrl(song.id, song.artwork);
+      migrated++;
+    } catch {
+      // Skip — will retry next time user is online
+    }
+  }
+  if (migrated > 0) {
+    render(); // Re-render with local artwork
+  }
+}
+
+/* ══════════════ REQUEST PERSISTENT STORAGE ══════════════ */
+async function requestPersistence() {
+  if (navigator.storage && navigator.storage.persist) {
+    const granted = await navigator.storage.persist();
+    if (granted) {
+      console.log("Persistent storage granted — songs will never be evicted");
+    }
+  }
+}
+
 /* ══════════════ INIT ══════════════ */
 loadMeta();
-render();
-updateStorageInfo();
-checkPwaBanner();
+render(); // Initial render with remote URLs (may show if online)
+
+// Then load local artwork from IndexedDB and re-render with offline-safe URLs
+(async function init() {
+  await loadAllArtwork();
+  render(); // Re-render with cached artwork
+  updateStorageInfo();
+  checkPwaBanner();
+  requestPersistence();
+  // Migrate artwork for existing songs that were downloaded before this update
+  migrateArtwork();
+})();
