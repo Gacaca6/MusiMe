@@ -5,10 +5,17 @@ const PLAYLISTS_KEY = "musime-playlists";
 const PLAYLIST_ORDERS_KEY = "musime-playlist-orders";
 const PLAYBACK_KEY = "musime-playback-state";
 const BACKUP_VERSION = 3;
-const SAAVN_API = "https://jiosavan-api2.vercel.app/api";
-// Audius API: returns a list of working hosts (no auth needed)
-const AUDIUS_DISCOVERY = "https://api.audius.co";
-let audiusHost = null; // resolved on first search
+
+// Multiple JioSaavn API mirrors. We try each in order on failure.
+// All expose the same /search/songs?query=... endpoint shape.
+const SAAVN_MIRRORS = [
+  "https://jiosavan-api2.vercel.app/api",
+  "https://saavn.dev/api",
+  "https://jio-saavn-nu.vercel.app/api",
+  "https://jiosaavn-api-codyandrew.vercel.app/api",
+];
+// Cache the last working mirror so we hit it first next time
+let saavnPreferredMirror = SAAVN_MIRRORS[0];
 
 let songs = [];
 let playlists = [];
@@ -274,65 +281,58 @@ function createId() { return `${Date.now()}-${Math.random().toString(36).slice(2
 function formatTime(sec) { if (!sec || !isFinite(sec)) return "0:00"; return `${Math.floor(sec / 60)}:${Math.floor(sec % 60).toString().padStart(2, "0")}`; }
 function decodeHtml(html) { const el = document.createElement("textarea"); el.innerHTML = html; return el.value; }
 
-/* ══════════════ JIOSAAVN API ══════════════ */
-async function fetchJioSaavnCandidates(query) {
-  const res = await fetch(`${SAAVN_API}/search/songs?query=${encodeURIComponent(query)}&limit=20`);
-  if (!res.ok) throw new Error("JioSaavn search failed");
-  const data = await res.json();
+/* ══════════════ JIOSAAVN API (with mirror fallback) ══════════════
+   JioSaavn has surprisingly strong Rwandan gospel coverage including
+   Israel Mbonyi, Aline Gahongayire, Adrien Misigaro, etc — all in
+   full 320kbps quality. We use multiple mirrors so search keeps working
+   when one mirror is rate-limited or down.
+*/
+function parseSaavnResults(data) {
   return (data?.data?.results || []).map((item) => {
     const dl = item.downloadUrl || [];
+    // pick highest-quality (last entry is typically 320kbps)
     const best = dl.length > 0 ? dl[dl.length - 1] : null;
     const art = (item.image || []).find((i) => i.quality === "500x500") || (item.image || [])[0];
     return {
-      id: `saavn-${item.id}`, title: decodeHtml(item.name || "Untitled"),
+      id: `saavn-${item.id}`,
+      title: decodeHtml(item.name || "Untitled"),
       artist: decodeHtml((item.artists?.primary || []).map((a) => a.name).join(", ") || ""),
-      album: decodeHtml(item.album?.name || ""), artwork: art?.url || "",
-      source: "jiosaavn", isPreview: false, url: best?.url || "",
-      qualityHint: best?.quality || "", duration: item.duration || 0,
+      album: decodeHtml(item.album?.name || ""),
+      artwork: art?.url || "",
+      source: "jiosaavn",
+      isPreview: false,
+      url: best?.url || "",
+      qualityHint: best?.quality || "",
+      duration: item.duration || 0,
     };
   }).filter((i) => i.url);
 }
 
-/* ══════════════ AUDIUS API ══════════════
-   Decentralized music platform. Has independent global artists
-   including African, gospel, and indie content. Free, no auth.
-*/
-async function getAudiusHost() {
-  if (audiusHost) return audiusHost;
-  try {
-    const res = await fetch(AUDIUS_DISCOVERY);
-    if (!res.ok) throw new Error();
-    const data = await res.json();
-    const hosts = data?.data || [];
-    if (hosts.length === 0) throw new Error();
-    audiusHost = hosts[Math.floor(Math.random() * hosts.length)];
-    return audiusHost;
-  } catch {
-    // Fallback to a known stable host
-    audiusHost = "https://discoveryprovider.audius.co";
-    return audiusHost;
+async function fetchJioSaavnCandidates(query) {
+  // Try the preferred mirror first, then the rest in order
+  const ordered = [saavnPreferredMirror, ...SAAVN_MIRRORS.filter((m) => m !== saavnPreferredMirror)];
+  let lastError = null;
+  for (const mirror of ordered) {
+    try {
+      const res = await fetch(`${mirror}/search/songs?query=${encodeURIComponent(query)}&limit=30`, {
+        // 8 second timeout per mirror so a slow mirror doesn't block the whole search
+        signal: AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined,
+      });
+      if (!res.ok) { lastError = new Error(`${mirror} returned ${res.status}`); continue; }
+      const data = await res.json();
+      const results = parseSaavnResults(data);
+      if (results.length > 0) {
+        saavnPreferredMirror = mirror; // remember the working one
+        return results;
+      }
+      // Empty result — try the next mirror
+    } catch (err) {
+      lastError = err;
+      // Try next mirror
+    }
   }
-}
-
-async function fetchAudiusCandidates(query) {
-  const host = await getAudiusHost();
-  const res = await fetch(`${host}/v1/tracks/search?query=${encodeURIComponent(query)}&app_name=MusiMe`);
-  if (!res.ok) throw new Error("Audius search failed");
-  const data = await res.json();
-  return (data?.data || []).slice(0, 15).map((track) => {
-    const artUrl = track.artwork?.["480x480"] || track.artwork?.["1000x1000"] || track.artwork?.["150x150"] || "";
-    return {
-      id: `audius-${track.id}`,
-      title: track.title || "Untitled",
-      artist: track.user?.name || track.user?.handle || "",
-      album: "",
-      artwork: artUrl,
-      source: "audius",
-      isPreview: false,
-      url: `${host}/v1/tracks/${track.id}/stream?app_name=MusiMe`,
-      duration: track.duration || 0,
-    };
-  });
+  if (lastError) throw lastError;
+  return [];
 }
 
 /* ══════════════ SEARCH ══════════════ */
@@ -340,15 +340,19 @@ async function searchRemoteSongs(query) {
   const q = query.replace(/\s+/g, " ").trim();
   if (!q) { remoteResults = []; renderRemoteResults(); return; }
   showToast("Searching...");
-  const settled = await Promise.allSettled([
-    fetchJioSaavnCandidates(q).catch(() => []),
-    fetchAudiusCandidates(q).catch(() => []),
-  ]);
-  remoteResults = settled.filter((e) => e.status === "fulfilled").flatMap((e) => e.value);
+  try {
+    remoteResults = await fetchJioSaavnCandidates(q);
+  } catch {
+    remoteResults = [];
+  }
+  // De-dupe by title+artist
   const seen = new Set();
-  remoteResults = remoteResults.filter((i) => { const k = `${i.title.toLowerCase()}|${(i.artist || "").toLowerCase()}|${i.source}`; if (seen.has(k)) return false; seen.add(k); return true; });
-  const w = { jiosaavn: 30, audius: 20 };
-  remoteResults.sort((a, b) => (w[b.source] || 0) - (w[a.source] || 0));
+  remoteResults = remoteResults.filter((i) => {
+    const k = `${i.title.toLowerCase()}|${(i.artist || "").toLowerCase()}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
   remoteResults = remoteResults.slice(0, 40);
   renderRemoteResults();
 }
@@ -425,7 +429,7 @@ function renderRemoteResults() {
     const row = document.createElement("article"); row.className = "result-item";
     // Search results use remote URLs (user is online to search)
     const artEl = result.artwork ? `<img class="art" src="${result.artwork}" alt="" loading="lazy">` : `<div class="art placeholder"><span>&#9835;</span></div>`;
-    const src = result.source === "jiosaavn" ? "JioSaavn" : result.source === "audius" ? "Audius" : result.source;
+    const src = result.source === "jiosaavn" ? "JioSaavn" : result.source;
     const bc = result.isPreview ? "preview" : "full";
     const bl = result.isPreview ? "Preview" : "Full";
     const durLabel = result.duration > 0 ? `<span class="duration-label">${formatTime(result.duration)}</span>` : "";
