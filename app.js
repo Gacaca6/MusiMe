@@ -3,8 +3,12 @@ const STORE_NAME = "songs";
 const SONGS_KEY = "musime-songs-meta";
 const PLAYLISTS_KEY = "musime-playlists";
 const PLAYLIST_ORDERS_KEY = "musime-playlist-orders";
+const PLAYBACK_KEY = "musime-playback-state";
 const BACKUP_VERSION = 3;
 const SAAVN_API = "https://jiosavan-api2.vercel.app/api";
+// Audius API: returns a list of working hosts (no auth needed)
+const AUDIUS_DISCOVERY = "https://api.audius.co";
+let audiusHost = null; // resolved on first search
 
 let songs = [];
 let playlists = [];
@@ -289,46 +293,46 @@ async function fetchJioSaavnCandidates(query) {
   }).filter((i) => i.url);
 }
 
-/* ══════════════ ARCHIVE API ══════════════ */
-function audioFileScore(file) {
-  const fmt = String(file.format || "").toLowerCase();
-  const name = String(file.name || "").toLowerCase();
-  if (!(name.endsWith(".mp3") || name.endsWith(".m4a") || name.endsWith(".ogg") || name.endsWith(".opus")))
-    if (!fmt.includes("mp3") && !fmt.includes("ogg") && !fmt.includes("aac") && !fmt.includes("mpeg")) return -1;
-  let s = 0;
-  if (name.endsWith(".mp3") || fmt.includes("vbr mp3") || fmt.includes("128kbps")) s += 6;
-  if (name.endsWith(".m4a") || fmt.includes("aac")) s += 4;
-  if (fmt.includes("ogg") || name.endsWith(".ogg")) s += 3;
-  if (Number(file.size || 0) > 0 && Number(file.size) < 50e6) s += 2;
-  return s;
-}
-async function fetchArchiveCandidates(query) {
-  const q = `(title:(${query}) OR subject:(${query})) AND mediatype:(audio)`;
-  const res = await fetch(`https://archive.org/advancedsearch.php?q=${encodeURIComponent(q)}&fl[]=identifier&fl[]=title&fl[]=creator&rows=8&page=1&output=json`);
-  if (!res.ok) throw new Error("Archive search failed");
-  const docs = (await res.json())?.response?.docs || [];
-  const results = await Promise.all(docs.map(async (doc) => {
-    try {
-      const md = await (await fetch(`https://archive.org/metadata/${encodeURIComponent(doc.identifier)}`)).json();
-      const scored = (md.files || []).map((f) => ({ f, s: audioFileScore(f) })).filter((e) => e.s >= 0).sort((a, b) => b.s - a.s);
-      if (!scored.length) return null;
-      const best = scored[0].f;
-      const safePath = (best.name || "").split("/").map((s) => encodeURIComponent(s)).join("/");
-      return { id: `archive-${doc.identifier}-${best.name}`, title: doc.title || "Untitled", artist: doc.creator || "", album: md?.metadata?.collection || "", artwork: md?.metadata?.identifier ? `https://archive.org/services/img/${encodeURIComponent(md.metadata.identifier)}` : "", source: "archive", isPreview: false, url: `https://archive.org/download/${encodeURIComponent(doc.identifier)}/${safePath}`, duration: 0 };
-    } catch { return null; }
-  }));
-  return results.filter(Boolean);
+/* ══════════════ AUDIUS API ══════════════
+   Decentralized music platform. Has independent global artists
+   including African, gospel, and indie content. Free, no auth.
+*/
+async function getAudiusHost() {
+  if (audiusHost) return audiusHost;
+  try {
+    const res = await fetch(AUDIUS_DISCOVERY);
+    if (!res.ok) throw new Error();
+    const data = await res.json();
+    const hosts = data?.data || [];
+    if (hosts.length === 0) throw new Error();
+    audiusHost = hosts[Math.floor(Math.random() * hosts.length)];
+    return audiusHost;
+  } catch {
+    // Fallback to a known stable host
+    audiusHost = "https://discoveryprovider.audius.co";
+    return audiusHost;
+  }
 }
 
-/* ══════════════ ITUNES API ══════════════ */
-async function fetchITunesCandidates(query) {
-  const res = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(query)}&entity=song&limit=10`);
-  if (!res.ok) throw new Error("iTunes failed");
-  return ((await res.json()).results || []).filter((i) => i.previewUrl).map((i) => ({
-    id: `itunes-${i.trackId}`, title: i.trackName || "Untitled", artist: i.artistName || "",
-    album: i.collectionName || "", artwork: (i.artworkUrl100 || "").replace("100x100", "300x300"),
-    source: "itunes", isPreview: true, url: i.previewUrl, duration: Math.round((i.trackTimeMillis || 0) / 1000),
-  }));
+async function fetchAudiusCandidates(query) {
+  const host = await getAudiusHost();
+  const res = await fetch(`${host}/v1/tracks/search?query=${encodeURIComponent(query)}&app_name=MusiMe`);
+  if (!res.ok) throw new Error("Audius search failed");
+  const data = await res.json();
+  return (data?.data || []).slice(0, 15).map((track) => {
+    const artUrl = track.artwork?.["480x480"] || track.artwork?.["1000x1000"] || track.artwork?.["150x150"] || "";
+    return {
+      id: `audius-${track.id}`,
+      title: track.title || "Untitled",
+      artist: track.user?.name || track.user?.handle || "",
+      album: "",
+      artwork: artUrl,
+      source: "audius",
+      isPreview: false,
+      url: `${host}/v1/tracks/${track.id}/stream?app_name=MusiMe`,
+      duration: track.duration || 0,
+    };
+  });
 }
 
 /* ══════════════ SEARCH ══════════════ */
@@ -338,15 +342,14 @@ async function searchRemoteSongs(query) {
   showToast("Searching...");
   const settled = await Promise.allSettled([
     fetchJioSaavnCandidates(q).catch(() => []),
-    fetchArchiveCandidates(q).catch(() => []),
-    fetchITunesCandidates(q).catch(() => []),
+    fetchAudiusCandidates(q).catch(() => []),
   ]);
   remoteResults = settled.filter((e) => e.status === "fulfilled").flatMap((e) => e.value);
   const seen = new Set();
   remoteResults = remoteResults.filter((i) => { const k = `${i.title.toLowerCase()}|${(i.artist || "").toLowerCase()}|${i.source}`; if (seen.has(k)) return false; seen.add(k); return true; });
-  const w = { jiosaavn: 30, archive: 15, itunes: 5 };
+  const w = { jiosaavn: 30, audius: 20 };
   remoteResults.sort((a, b) => (w[b.source] || 0) - (w[a.source] || 0));
-  remoteResults = remoteResults.slice(0, 30);
+  remoteResults = remoteResults.slice(0, 40);
   renderRemoteResults();
 }
 
@@ -422,7 +425,7 @@ function renderRemoteResults() {
     const row = document.createElement("article"); row.className = "result-item";
     // Search results use remote URLs (user is online to search)
     const artEl = result.artwork ? `<img class="art" src="${result.artwork}" alt="" loading="lazy">` : `<div class="art placeholder"><span>&#9835;</span></div>`;
-    const src = result.source === "jiosaavn" ? "JioSaavn" : result.source === "archive" ? "Archive" : "iTunes";
+    const src = result.source === "jiosaavn" ? "JioSaavn" : result.source === "audius" ? "Audius" : result.source;
     const bc = result.isPreview ? "preview" : "full";
     const bl = result.isPreview ? "Preview" : "Full";
     const durLabel = result.duration > 0 ? `<span class="duration-label">${formatTime(result.duration)}</span>` : "";
@@ -585,6 +588,70 @@ nodes.queueClear.addEventListener("click", () => {
   showToast("Queue cleared");
 });
 
+/* ══════════════ PLAYBACK STATE PERSISTENCE ══════════════
+   Saves currentSongId + position so the song NEVER disappears
+   when iOS suspends the page (e.g. screen locked for a while).
+*/
+let savePlaybackTimer = null;
+function savePlaybackState() {
+  if (!currentSongId) return;
+  try {
+    localStorage.setItem(PLAYBACK_KEY, JSON.stringify({
+      songId: currentSongId,
+      currentTime: nodes.audio.currentTime || 0,
+      timestamp: Date.now(),
+    }));
+  } catch {}
+}
+function schedulePlaybackSave() {
+  // Throttle to once every 2 seconds during playback
+  if (savePlaybackTimer) return;
+  savePlaybackTimer = setTimeout(() => {
+    savePlaybackState();
+    savePlaybackTimer = null;
+  }, 2000);
+}
+
+async function restorePlaybackState() {
+  try {
+    const raw = localStorage.getItem(PLAYBACK_KEY);
+    if (!raw) return;
+    const state = JSON.parse(raw);
+    if (!state || !state.songId) return;
+    const song = songs.find((s) => s.id === state.songId);
+    if (!song) return;
+    const blob = await getBlob(song.id);
+    if (!blob) return;
+    if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
+    currentObjectUrl = URL.createObjectURL(blob);
+    nodes.audio.src = currentObjectUrl;
+    currentSongId = song.id;
+
+    // Seek to the saved position once metadata loads
+    nodes.audio.addEventListener("loadedmetadata", () => {
+      try { nodes.audio.currentTime = state.currentTime || 0; } catch {}
+    }, { once: true });
+
+    // Restore mini player UI
+    const localArt = getArtUrl(song);
+    nodes.miniPlayer.classList.remove("hidden");
+    nodes.miniTitle.textContent = song.title;
+    nodes.miniArtist.textContent = song.artist || "Unknown";
+    if (localArt) { nodes.miniArt.src = localArt; nodes.miniArt.classList.remove("hidden"); nodes.miniArtPlaceholder.classList.add("hidden"); }
+    else { nodes.miniArt.classList.add("hidden"); nodes.miniArtPlaceholder.classList.remove("hidden"); }
+
+    // Restore now playing UI
+    nodes.npTitle.textContent = song.title;
+    nodes.npArtist.textContent = song.artist || "Unknown";
+    if (localArt) { nodes.npArtwork.src = localArt; nodes.npArtwork.classList.remove("hidden"); nodes.npArtworkPlaceholder.classList.add("hidden"); }
+    else { nodes.npArtwork.classList.add("hidden"); nodes.npArtworkPlaceholder.classList.remove("hidden"); }
+
+    updateMediaSession(song, localArt);
+    setPlayingState(false); // Restored paused — user must tap play
+    renderSongs();
+  } catch {}
+}
+
 /* ══════════════ PLAYBACK + BACKGROUND AUDIO ══════════════ */
 function getPlaylist() {
   const list = sortSongs(filterSongs());
@@ -647,8 +714,30 @@ function updateMediaSession(song, localArt) {
     album: song.album || "MusiMe",
     artwork,
   });
-  navigator.mediaSession.setActionHandler("play", () => { nodes.audio.play(); setPlayingState(true); });
-  navigator.mediaSession.setActionHandler("pause", () => { nodes.audio.pause(); setPlayingState(false); });
+  // Bulletproof play handler: if the audio element lost its src
+  // (iOS Safari sometimes does this when the page is suspended),
+  // reload the song from IndexedDB before playing.
+  navigator.mediaSession.setActionHandler("play", async () => {
+    try {
+      if (!nodes.audio.src && currentSongId) {
+        const s = songs.find((x) => x.id === currentSongId);
+        if (s) { await playSong(s); return; }
+      }
+      await nodes.audio.play();
+      setPlayingState(true);
+    } catch {
+      // Last-resort recovery: reload from current song id
+      if (currentSongId) {
+        const s = songs.find((x) => x.id === currentSongId);
+        if (s) { try { await playSong(s); } catch {} }
+      }
+    }
+  });
+  navigator.mediaSession.setActionHandler("pause", () => {
+    try { nodes.audio.pause(); } catch {}
+    setPlayingState(false);
+    savePlaybackState();
+  });
   navigator.mediaSession.setActionHandler("previoustrack", () => playNext(-1));
   navigator.mediaSession.setActionHandler("nexttrack", () => playNext(1));
   try {
@@ -704,7 +793,7 @@ function playNext(direction = 1) {
 
 // Audio events
 nodes.audio.addEventListener("play", () => setPlayingState(true));
-nodes.audio.addEventListener("pause", () => setPlayingState(false));
+nodes.audio.addEventListener("pause", () => { setPlayingState(false); savePlaybackState(); });
 nodes.audio.addEventListener("ended", () => {
   if (repeatMode === "one") { nodes.audio.currentTime = 0; nodes.audio.play(); return; }
   playNext(1);
@@ -718,7 +807,15 @@ nodes.audio.addEventListener("timeupdate", () => {
   nodes.npCurrent.textContent = formatTime(currentTime);
   nodes.npDuration.textContent = formatTime(duration);
   updatePositionState();
+  schedulePlaybackSave();
 });
+
+// Save state when page is hidden/closed (handles iOS suspend & app close)
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") savePlaybackState();
+});
+window.addEventListener("pagehide", savePlaybackState);
+window.addEventListener("beforeunload", savePlaybackState);
 nodes.audio.addEventListener("loadedmetadata", () => {
   if (currentSongId && nodes.audio.duration) {
     const ref = songs.find((s) => s.id === currentSongId);
@@ -803,8 +900,12 @@ async function removeSong(id) {
   userQueue = userQueue.filter((s) => s.id !== id);
   await deleteBlob(id);
   await deleteArtwork(id);
-  // Revoke artwork object URL
   if (artCache.has(id)) { URL.revokeObjectURL(artCache.get(id)); artCache.delete(id); }
+  // If we deleted the currently-restored song, clear playback state
+  if (currentSongId === id) {
+    currentSongId = null;
+    try { localStorage.removeItem(PLAYBACK_KEY); } catch {}
+  }
   saveMeta(); render(); showToast("Removed");
 }
 async function addSong({ title, artist, source, blob, album = "", artwork = "", duration = 0 }) {
@@ -951,6 +1052,8 @@ render(); // Initial render with remote URLs (may show if online)
 (async function init() {
   await loadAllArtwork();
   render(); // Re-render with cached artwork
+  // Restore the last playing song so it never "disappears" after iOS suspends the page
+  await restorePlaybackState();
   updateStorageInfo();
   checkPwaBanner();
   requestPersistence();
