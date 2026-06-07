@@ -721,11 +721,27 @@ function updateMediaSession(song, localArt) {
   // Bulletproof play handler: if the audio element lost its src
   // (iOS Safari sometimes does this when the page is suspended),
   // reload the song from IndexedDB before playing.
+  // Also handles the case where the src string is still set but the underlying
+  // Blob was evicted by iOS after the page was paused — detectable via
+  // readyState === HAVE_NOTHING or a non-null error on the element.
   navigator.mediaSession.setActionHandler("play", async () => {
     try {
-      if (!nodes.audio.src && currentSongId) {
+      const srcLost = !nodes.audio.src
+        || nodes.audio.error !== null
+        || nodes.audio.readyState === HTMLMediaElement.HAVE_NOTHING;
+      if (srcLost && currentSongId) {
         const s = songs.find((x) => x.id === currentSongId);
-        if (s) { await playSong(s); return; }
+        if (s) {
+          // Recover saved position so resume continues from the right spot
+          let savedTime = 0;
+          try {
+            const raw = localStorage.getItem(PLAYBACK_KEY);
+            if (raw) { const st = JSON.parse(raw); if (st.songId === s.id) savedTime = st.currentTime || 0; }
+          } catch {}
+          await playSong(s);
+          if (savedTime > 0) { try { nodes.audio.currentTime = savedTime; } catch {} }
+          return;
+        }
       }
       await nodes.audio.play();
       setPlayingState(true);
@@ -768,6 +784,12 @@ function setPlayingState(playing) {
   nodes.miniPauseIcon.classList.toggle("hidden", !playing);
   nodes.npPlayIcon.classList.toggle("hidden", playing);
   nodes.npPauseIcon.classList.toggle("hidden", !playing);
+  // Keep the OS lock-screen / notification controls in sync. Without this the
+  // OS doesn't know the player is paused and may not dispatch the "play" action
+  // when the user taps the lock-screen play button.
+  if ("mediaSession" in navigator) {
+    navigator.mediaSession.playbackState = playing ? "playing" : "paused";
+  }
 }
 
 function togglePlayPause() {
