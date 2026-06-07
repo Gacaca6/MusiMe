@@ -826,17 +826,29 @@ function readSavedTime() {
   return 0;
 }
 
-/* ── SILENT KEEP-ALIVE (WebAudio) ────────────────────────────────────────────
-   Keeps the iOS audio session active so a lock-screen resume RENDERS immediately
-   instead of being deferred until unlock. Earlier this used a second silent
-   <audio> element, but iOS treats that as a real media/transport source: the
-   Now-Playing card latched onto it, causing the play/pause icon to flip and the
-   progress to jump (0:33 -> 0:01). A WebAudio graph is NOT a media element, so
-   iOS never shows it in Now-Playing and never re-dispatches transport actions
-   for it — it just holds the audio session open. Standalone PWA only. */
-let audioCtx = null;
-let keepAliveOsc = null;
-let keepAliveGain = null;
+/* ── SILENT KEEP-ALIVE (HTML <audio>) ────────────────────────────────────────
+   The mechanism that actually makes a lock-screen resume RENDER while the screen
+   is still locked. On iOS, once the MAIN element is paused while locked, iOS
+   deactivates the app's audio session and a later play() is queued but not
+   rendered until unlock. A second, silent <audio> looping forever keeps the iOS
+   audio session active across that locked pause, so the main track resumes
+   immediately. (A WebAudio oscillator was tried in v9 and did NOT hold the
+   session for the HTMLMediaElement — locked rendering broke — so we keep the
+   proven <audio> approach.) It is silent (zero-sample WAV) and carries NO media
+   metadata, and our positionState publisher only ever reads the MAIN element, so
+   it cannot drive the now-playing card. Standalone PWA only. */
+let keepAliveEl = null;
+function makeSilenceUrl(seconds) {
+  const sr = 8000, n = Math.max(1, Math.floor(sr * seconds));
+  const buf = new ArrayBuffer(44 + n * 2), dv = new DataView(buf);
+  const ws = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+  ws(0, "RIFF"); dv.setUint32(4, 36 + n * 2, true); ws(8, "WAVE"); ws(12, "fmt ");
+  dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+  dv.setUint32(24, sr, true); dv.setUint32(28, sr * 2, true); dv.setUint16(32, 2, true);
+  dv.setUint16(34, 16, true); ws(36, "data"); dv.setUint32(40, n * 2, true);
+  // sample bytes left as zeros == pure silence
+  return URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+}
 
 /* ── Lock-screen control hardening ──────────────────────────────────────────
    iOS re-dispatches media actions (we saw two "pause" events ~1s apart) and can
@@ -857,29 +869,23 @@ function actionDebounced(type) {
 
 function ensureKeepAlive() {
   if (!IS_STANDALONE) return; // Safari resumes fine without a session-holder
-  try {
-    if (!audioCtx) {
-      const AC = window.AudioContext || window.webkitAudioContext;
-      if (!AC) { dbg("keepAlive: no AudioContext support"); return; }
-      audioCtx = new AC();
-      keepAliveGain = audioCtx.createGain();
-      keepAliveGain.gain.value = 0.0001; // inaudible, but non-zero keeps the session live
-      keepAliveGain.connect(audioCtx.destination);
-      keepAliveOsc = audioCtx.createOscillator();
-      keepAliveOsc.type = "sine";
-      keepAliveOsc.frequency.value = 20; // sub-audible
-      keepAliveOsc.connect(keepAliveGain);
-      keepAliveOsc.start();
-      dbg(`keepAlive(webaudio) created state=${audioCtx.state}`);
-    }
-    if (audioCtx.state === "suspended") {
-      // Must be (re)resumed from a user gesture / media-action; resumePlayback &
-      // playSong both run in that context.
-      audioCtx.resume().then(() => dbg(`keepAlive ctx resumed state=${audioCtx.state}`))
-                       .catch((e) => dbg(`keepAlive resume rejected: ${e?.message || e}`));
-    }
-  } catch (e) {
-    dbg(`ensureKeepAlive error: ${e?.message || e}`);
+  if (!keepAliveEl) {
+    keepAliveEl = document.createElement("audio");
+    keepAliveEl.loop = true;
+    keepAliveEl.preload = "auto";
+    keepAliveEl.setAttribute("playsinline", "");
+    keepAliveEl.setAttribute("aria-hidden", "true");
+    keepAliveEl.volume = 1; // samples are silent, so this stays inaudible; volume>0
+                            // keeps iOS treating it as active playback (don't mute —
+                            // a muted element may not hold the audio session open).
+    keepAliveEl.style.display = "none";
+    keepAliveEl.src = makeSilenceUrl(0.5);
+    document.body.appendChild(keepAliveEl);
+    dbg("keepAlive created");
+  }
+  if (keepAliveEl.paused) {
+    const p = keepAliveEl.play();
+    if (p && p.catch) p.catch((e) => dbg(`keepAlive play rejected: ${e?.message || e}`));
   }
 }
 
@@ -960,6 +966,8 @@ async function resumePlayback() {
     await a.play();
     wasSuspended = false;
     setPlayingState(true);
+    updatePositionState(true); // assert the MAIN song position immediately so iOS
+                               // can't show a derived/wrong position on the card
     dbg(`resume play ok: ${audioStateStr()}`);
   } catch (e) {
     dbg(`resume play() rejected: ${e?.message || e}`);
@@ -1111,7 +1119,7 @@ function playNext(direction = 1) {
 
 // Audio events
 nodes.audio.addEventListener("play", () => { setPlayingState(true); });
-nodes.audio.addEventListener("playing", () => { setPlayingState(true); updatePositionState(); });
+nodes.audio.addEventListener("playing", () => { setPlayingState(true); updatePositionState(true); });
 nodes.audio.addEventListener("pause", () => { setPlayingState(false); savePlaybackState(); });
 nodes.audio.addEventListener("ended", () => {
   if (repeatMode === "one") { nodes.audio.currentTime = 0; nodes.audio.play(); return; }
