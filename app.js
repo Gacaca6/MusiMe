@@ -307,7 +307,7 @@ try { debugBuffer = JSON.parse(localStorage.getItem(DEBUG_LOG_KEY) || "[]"); } c
 function dbg(msg) {
   const line = `${new Date().toISOString().slice(11, 23)} ${msg}`;
   debugBuffer.push(line);
-  if (debugBuffer.length > 120) debugBuffer.shift();
+  if (debugBuffer.length > 220) debugBuffer.shift();
   try { localStorage.setItem(DEBUG_LOG_KEY, JSON.stringify(debugBuffer)); } catch {}
   try { console.log("[MusiMe]", msg); } catch {}
 }
@@ -826,15 +826,17 @@ function readSavedTime() {
   return 0;
 }
 
-/* ── SILENT KEEP-ALIVE ──────────────────────────────────────────────────────
-   The core of the "armed but silent until unlock" fix. On iOS, once the MAIN
-   element is paused while the screen is locked, iOS deactivates the app's audio
-   session; a later play() is then queued but not RENDERED until the screen
-   wakes. We prevent that by keeping a second, silent <audio> looping forever
-   from the first user-initiated play. Because that element never stops, the iOS
-   audio session stays active across a locked pause, so resuming the main track
-   renders immediately. Standalone PWA only — Safari resumes fine without it. */
-let keepAliveEl = null;
+/* ── SILENT KEEP-ALIVE (WebAudio) ────────────────────────────────────────────
+   Keeps the iOS audio session active so a lock-screen resume RENDERS immediately
+   instead of being deferred until unlock. Earlier this used a second silent
+   <audio> element, but iOS treats that as a real media/transport source: the
+   Now-Playing card latched onto it, causing the play/pause icon to flip and the
+   progress to jump (0:33 -> 0:01). A WebAudio graph is NOT a media element, so
+   iOS never shows it in Now-Playing and never re-dispatches transport actions
+   for it — it just holds the audio session open. Standalone PWA only. */
+let audioCtx = null;
+let keepAliveOsc = null;
+let keepAliveGain = null;
 
 /* ── Lock-screen control hardening ──────────────────────────────────────────
    iOS re-dispatches media actions (we saw two "pause" events ~1s apart) and can
@@ -853,34 +855,31 @@ function actionDebounced(type) {
   return false;
 }
 
-function makeSilenceUrl(seconds) {
-  const sr = 8000, n = Math.max(1, Math.floor(sr * seconds));
-  const buf = new ArrayBuffer(44 + n * 2), dv = new DataView(buf);
-  const ws = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
-  ws(0, "RIFF"); dv.setUint32(4, 36 + n * 2, true); ws(8, "WAVE"); ws(12, "fmt ");
-  dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
-  dv.setUint32(24, sr, true); dv.setUint32(28, sr * 2, true); dv.setUint16(32, 2, true);
-  dv.setUint16(34, 16, true); ws(36, "data"); dv.setUint32(40, n * 2, true);
-  // sample bytes left as zeros == pure silence
-  return URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
-}
 function ensureKeepAlive() {
   if (!IS_STANDALONE) return; // Safari resumes fine without a session-holder
-  if (!keepAliveEl) {
-    keepAliveEl = document.createElement("audio");
-    keepAliveEl.loop = true;
-    keepAliveEl.preload = "auto";
-    keepAliveEl.setAttribute("playsinline", "");
-    keepAliveEl.setAttribute("aria-hidden", "true");
-    keepAliveEl.volume = 1; // samples are silent, so this stays inaudible
-    keepAliveEl.style.display = "none";
-    keepAliveEl.src = makeSilenceUrl(0.5);
-    document.body.appendChild(keepAliveEl);
-    dbg("keepAlive created");
-  }
-  if (keepAliveEl.paused) {
-    const p = keepAliveEl.play();
-    if (p && p.catch) p.catch((e) => dbg(`keepAlive play rejected: ${e?.message || e}`));
+  try {
+    if (!audioCtx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) { dbg("keepAlive: no AudioContext support"); return; }
+      audioCtx = new AC();
+      keepAliveGain = audioCtx.createGain();
+      keepAliveGain.gain.value = 0.0001; // inaudible, but non-zero keeps the session live
+      keepAliveGain.connect(audioCtx.destination);
+      keepAliveOsc = audioCtx.createOscillator();
+      keepAliveOsc.type = "sine";
+      keepAliveOsc.frequency.value = 20; // sub-audible
+      keepAliveOsc.connect(keepAliveGain);
+      keepAliveOsc.start();
+      dbg(`keepAlive(webaudio) created state=${audioCtx.state}`);
+    }
+    if (audioCtx.state === "suspended") {
+      // Must be (re)resumed from a user gesture / media-action; resumePlayback &
+      // playSong both run in that context.
+      audioCtx.resume().then(() => dbg(`keepAlive ctx resumed state=${audioCtx.state}`))
+                       .catch((e) => dbg(`keepAlive resume rejected: ${e?.message || e}`));
+    }
+  } catch (e) {
+    dbg(`ensureKeepAlive error: ${e?.message || e}`);
   }
 }
 
@@ -1014,7 +1013,7 @@ function registerMediaHandlers() {
   set("seekto", (details) => {
     if (details && details.seekTime != null) {
       try { nodes.audio.currentTime = details.seekTime; } catch {}
-      updatePositionState();
+      updatePositionState(true); // immediate, bypass throttle
     }
   });
   set("seekbackward", (details) => {
@@ -1031,17 +1030,37 @@ function registerMediaHandlers() {
   dbg("media handlers registered");
 }
 
-function updatePositionState() {
+/* Single source of truth for the lock-screen scrubber. ALWAYS reads the MAIN song
+   element (nodes.audio) — never the keep-alive — is throttled, and only publishes
+   on a real change, so two callers can't race into the position jitter the user saw.
+   `force` (seek) bypasses the throttle. */
+let lastPos = { d: -1, p: -1, at: 0 };
+let lastPosLogAt = 0;
+function updatePositionState(force = false) {
   if (!("mediaSession" in navigator) || !navigator.mediaSession.setPositionState) return;
-  const d = nodes.audio.duration;
-  if (!d || !isFinite(d)) return;
+  const a = nodes.audio; // MAIN element ONLY
+  const d = a.duration;
+  // Ignore until the real song duration is known — prevents bogus tiny-duration
+  // states (which is exactly how a wrong/short source would show 0:01 / -3:27).
+  if (!d || !isFinite(d) || d < 1) return;
+  const p = Math.min(Math.max(a.currentTime || 0, 0), d);
+  const r = a.playbackRate || 1; // never 0 (setPositionState throws on 0)
+  const now = Date.now();
+  const changed = Math.abs(p - lastPos.p) > 0.25 || d !== lastPos.d;
+  if (!force && !changed && (now - lastPos.at) < 1000) return;
+  // Detect a JUMP (the bug signature: position moving backwards or skipping) so
+  // the log always captures it, while routine ticks only heartbeat every ~5s.
+  const jump = lastPos.p >= 0 && Math.abs(p - lastPos.p) > 1.5;
   try {
-    navigator.mediaSession.setPositionState({
-      duration: d,
-      playbackRate: nodes.audio.playbackRate || 1,
-      position: Math.min(nodes.audio.currentTime || 0, d),
-    });
-  } catch {}
+    navigator.mediaSession.setPositionState({ duration: d, position: p, playbackRate: r });
+    if (force || jump || d !== lastPos.d || (now - lastPosLogAt) > 5000) {
+      dbg(`setPositionState[main] d=${d.toFixed(1)} p=${p.toFixed(1)} r=${r}${jump ? " JUMP" : ""}`);
+      lastPosLogAt = now;
+    }
+    lastPos = { d, p, at: now };
+  } catch (e) {
+    dbg(`setPositionState err: ${e?.message || e}`);
+  }
 }
 
 function setPlayingState(playing) {
