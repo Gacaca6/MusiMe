@@ -1,4 +1,4 @@
-const CACHE_NAME = "musime-static-v13";
+const CACHE_NAME = "musime-static-v14";
 const STATIC_ASSETS = [
   "./",
   "./index.html",

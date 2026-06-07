@@ -270,7 +270,7 @@ function loadMeta() {
   playlists = JSON.parse(localStorage.getItem(PLAYLISTS_KEY) || "[]");
   playlistOrders = JSON.parse(localStorage.getItem(PLAYLIST_ORDERS_KEY) || "{}");
   if (!playlists.includes("All songs")) playlists.unshift("All songs");
-  songs = songs.map((s) => ({ ...s, playlists: Array.isArray(s.playlists) ? s.playlists : [], createdAt: s.createdAt || Date.now(), lastPlayedAt: s.lastPlayedAt || 0, playCount: s.playCount || 0, album: s.album || "", artwork: s.artwork || "", duration: s.duration || 0 }));
+  songs = songs.map((s) => ({ ...s, playlists: Array.isArray(s.playlists) ? s.playlists : [], createdAt: s.createdAt || Date.now(), lastPlayedAt: s.lastPlayedAt || 0, playCount: s.playCount || 0, album: s.album || "", artwork: s.artwork || "", duration: s.duration || 0, saavnId: s.saavnId || "", query: s.query || "", srcUrl: s.srcUrl || "" }));
   normalizePlaylistOrders();
 }
 
@@ -332,6 +332,7 @@ function parseSaavnResults(data) {
     const art = (item.image || []).find((i) => i.quality === "500x500") || (item.image || [])[0];
     return {
       id: `saavn-${item.id}`,
+      saavnId: item.id || "", // raw JioSaavn id — stored on the song for re-download
       title: decodeHtml(item.name || "Untitled"),
       artist: decodeHtml((item.artists?.primary || []).map((a) => a.name).join(", ") || ""),
       album: decodeHtml(item.album?.name || ""),
@@ -391,6 +392,9 @@ async function searchRemoteSongs(query) {
     return true;
   });
   remoteResults = remoteResults.slice(0, 40);
+  // Remember the query that surfaced each result — a cheap fallback re-download
+  // key if the saavnId ever stops resolving.
+  remoteResults.forEach((r) => { r.query = q; });
   renderRemoteResults();
 }
 
@@ -421,7 +425,7 @@ async function processQueue() {
       next.state = "downloading"; next.progress = 10; renderQueue();
       try {
         const blob = await fetchAudioBlob(next.result.url, (p) => { next.progress = p; renderQueue(); });
-        const songId = await addSong({ title: next.result.title, artist: next.result.artist, source: next.result.source, blob, album: next.result.album || "", artwork: next.result.artwork || "", duration: next.result.duration || 0 });
+        const songId = await addSong({ title: next.result.title, artist: next.result.artist, source: next.result.source, blob, album: next.result.album || "", artwork: next.result.artwork || "", duration: next.result.duration || 0, saavnId: next.result.saavnId || "", query: next.result.query || "" });
         // Cache artwork locally for offline use
         if (next.result.artwork && songId) {
           await cacheArtworkFromUrl(songId, next.result.artwork);
@@ -1286,10 +1290,13 @@ async function removeSong(id) {
   }
   saveMeta(); render(); showToast("Removed");
 }
-async function addSong({ title, artist, source, blob, album = "", artwork = "", duration = 0 }) {
+async function addSong({ title, artist, source, blob, album = "", artwork = "", duration = 0, saavnId = "", query = "", srcUrl = "" }) {
   const id = createId();
   await saveBlob(id, blob);
-  songs.unshift({ id, title, artist, source, favorite: false, playlists: [], createdAt: Date.now(), lastPlayedAt: 0, playCount: 0, album, artwork, duration });
+  // saavnId/query/srcUrl are re-download keys (no effect on offline playback) —
+  // they let a future sync/restore re-fetch the audio: jiosaavn via saavnId
+  // (query as fallback), web songs via the original srcUrl.
+  songs.unshift({ id, title, artist, source, favorite: false, playlists: [], createdAt: Date.now(), lastPlayedAt: 0, playCount: 0, album, artwork, duration, saavnId, query, srcUrl });
   saveMeta(); render(); updateStorageInfo();
   return id; // Return id so caller can cache artwork
 }
@@ -1341,7 +1348,7 @@ async function importBackup(file) {
   artCache.forEach((url) => URL.revokeObjectURL(url));
   artCache.clear();
   for (const e of payload.blobs || []) { if (!e.id || !e.dataUrl) continue; await saveBlob(e.id, await (await fetch(e.dataUrl)).blob()); }
-  songs = payload.songs.map((s) => ({ ...s, playlists: Array.isArray(s.playlists) ? s.playlists : [], createdAt: s.createdAt || Date.now(), lastPlayedAt: s.lastPlayedAt || 0, playCount: s.playCount || 0, album: s.album || "", artwork: s.artwork || "", duration: s.duration || 0 }));
+  songs = payload.songs.map((s) => ({ ...s, playlists: Array.isArray(s.playlists) ? s.playlists : [], createdAt: s.createdAt || Date.now(), lastPlayedAt: s.lastPlayedAt || 0, playCount: s.playCount || 0, album: s.album || "", artwork: s.artwork || "", duration: s.duration || 0, saavnId: s.saavnId || "", query: s.query || "", srcUrl: s.srcUrl || "" }));
   playlists = payload.playlists?.includes("All songs") ? payload.playlists : ["All songs", ...(payload.playlists || [])];
   playlistOrders = payload.playlistOrders || {}; normalizePlaylistOrders();
   selectedPlaylist = "All songs"; favoritesOnly = false; searchQuery = ""; sortMode = "newest";
@@ -1355,7 +1362,7 @@ async function importBackup(file) {
 nodes.searchForm.addEventListener("submit", async (e) => { e.preventDefault(); try { await searchRemoteSongs(nodes.searchQuery.value); } catch { remoteResults = []; renderRemoteResults(); showToast("Search failed"); } });
 nodes.urlForm.addEventListener("submit", async (e) => {
   e.preventDefault(); const url = nodes.songUrl.value.trim(); const title = nodes.songTitle.value.trim(); const artist = nodes.songArtist.value.trim();
-  try { showToast("Downloading..."); const res = await fetch(url); if (!res.ok) throw 0; await addSong({ title, artist, source: "web", blob: await res.blob() }); nodes.urlForm.reset(); showToast("Saved offline"); } catch { showToast("Could not download"); }
+  try { showToast("Downloading..."); const res = await fetch(url); if (!res.ok) throw 0; await addSong({ title, artist, source: "web", blob: await res.blob(), srcUrl: url }); nodes.urlForm.reset(); showToast("Saved offline"); } catch { showToast("Could not download"); }
 });
 nodes.fileInput.addEventListener("change", async (e) => { for (const f of [...(e.target.files || [])]) { if (!f.type.startsWith("audio/")) continue; await addSong({ title: f.name.replace(/\.[^/.]+$/, ""), artist: "", source: "device", blob: f }); } nodes.fileInput.value = ""; showToast("Imported"); });
 nodes.playlistForm.addEventListener("submit", (e) => { e.preventDefault(); const n = nodes.playlistForm.querySelector("input").value.trim(); if (!n) return; nodes.playlistForm.reset(); createPlaylist(n); });
