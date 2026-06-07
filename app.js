@@ -1440,13 +1440,25 @@ async function migrateArtwork() {
   }
 }
 
-/* ══════════════ REQUEST PERSISTENT STORAGE ══════════════ */
+/* ══════════════ REQUEST PERSISTENT STORAGE ══════════════
+   Ask the browser to mark our storage as persistent so the OS is far less likely
+   to silently evict downloaded songs/artwork under storage pressure. Fully
+   feature-detected and idempotent; every outcome is logged to the diagnostics. */
 async function requestPersistence() {
-  if (navigator.storage && navigator.storage.persist) {
-    const granted = await navigator.storage.persist();
-    if (granted) {
-      console.log("Persistent storage granted — songs will never be evicted");
+  try {
+    if (!navigator.storage || !navigator.storage.persist) {
+      dbg("persist: API unavailable");
+      return;
     }
+    // Don't re-prompt if already persistent.
+    if (navigator.storage.persisted) {
+      const already = await navigator.storage.persisted();
+      if (already) { dbg("persist: already persistent"); return; }
+    }
+    const granted = await navigator.storage.persist();
+    dbg(`persist: requested -> ${granted ? "GRANTED" : "denied"}`);
+  } catch (e) {
+    dbg(`persist: error ${e?.message || e}`);
   }
 }
 
