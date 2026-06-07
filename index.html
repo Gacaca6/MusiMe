@@ -130,7 +130,17 @@
           </label>
         </section>
         <section class="settings-section">
+          <h3>Library Sync</h3>
+          <p class="hint" style="margin-bottom:0.6rem">Save a small file of your library (songs list, playlists, favorites — no audio). If you reinstall, import it to rebuild your library and auto re-download the songs.</p>
+          <div class="backup-row">
+            <button id="export-library" type="button" class="pill-btn wide">Export Library</button>
+            <label for="import-library-file" class="pill-btn wide fake-btn">Import Library</label>
+            <input id="import-library-file" type="file" accept="application/json" class="hidden" />
+          </div>
+        </section>
+        <section class="settings-section">
           <h3>Backup &amp; Restore</h3>
+          <p class="hint" style="margin-bottom:0.6rem">Full backup includes the audio files (large). Use this to move everything to another device without re-downloading.</p>
           <div class="backup-row">
             <button id="export-backup" type="button" class="pill-btn wide">Export Backup</button>
             <label for="import-backup-file" class="pill-btn wide fake-btn">Import Backup</label>

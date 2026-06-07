@@ -86,6 +86,8 @@ const nodes = {
   recentlyPlayed: $("recently-played"),
   exportBackup: $("export-backup"),
   importBackupFile: $("import-backup-file"),
+  exportLibrary: $("export-library"),
+  importLibraryFile: $("import-library-file"),
   miniPlayer: $("mini-player"),
   miniProgress: $("mini-progress"),
   miniContent: $("mini-content"),
@@ -547,7 +549,8 @@ function renderSongs() {
     const durText = song.duration > 0 ? formatTime(song.duration) : "";
     const durEl = durText ? `<span class="song-duration">${durText}</span>` : "";
     const playCountText = song.playCount > 0 ? ` &middot; ${song.playCount} play${song.playCount !== 1 ? "s" : ""}` : "";
-    item.innerHTML = `${artHtml(song, "song-art", "placeholder")}<div class="song-main"><p class="song-title">${song.title}</p><p class="song-meta">${song.artist || "Unknown"} &middot; ${song.source}${playCountText}</p>${durEl}</div><div class="actions"></div>`;
+    const readdText = song.needsReadd ? ` &middot; <span style="color:#e6a23c">needs manual re-add</span>` : "";
+    item.innerHTML = `${artHtml(song, "song-art", "placeholder")}<div class="song-main"><p class="song-title">${song.title}</p><p class="song-meta">${song.artist || "Unknown"} &middot; ${song.source}${playCountText}${readdText}</p>${durEl}</div><div class="actions"></div>`;
     const actions = item.querySelector(".actions");
     actions.append(mkBtn("&#9654;", () => playSong(song)));
     actions.append(mkBtn("&#8631;", () => addToUserQueue(song, true), false, "Play next"));
@@ -1358,6 +1361,133 @@ async function importBackup(file) {
   render();
 }
 
+/* ══════════════ LIBRARY SYNC (metadata-only) ══════════════
+   Exports ONLY the library records (songs list, playlists, ordering, favorites,
+   recently-played, play counts) — NO audio blobs — so the file stays tiny. On
+   import we MERGE the records (never wipe existing audio) and then re-download
+   the audio through JioSaavn using each song's saavnId. This is purely additive:
+   it never touches the offline playback path. */
+const LIBRARY_VERSION = 1;
+async function exportLibrary() {
+  const payload = {
+    app: "MusiMe", kind: "library", version: LIBRARY_VERSION,
+    exportedAt: new Date().toISOString(),
+    songs, playlists, playlistOrders,
+  };
+  const url = URL.createObjectURL(new Blob([JSON.stringify(payload)], { type: "application/json" }));
+  const a = document.createElement("a"); a.href = url; a.download = `musime-library-${Date.now()}.json`; a.click();
+  URL.revokeObjectURL(url);
+  showToast(`Library exported (${songs.length} songs)`);
+}
+
+async function importLibrary(file) {
+  const payload = JSON.parse(await file.text());
+  if (!payload || payload.app !== "MusiMe" || !Array.isArray(payload.songs)) throw new Error("Invalid library file");
+
+  // MERGE records — keep any songs (and their audio) we already have.
+  const existingIds = new Set(songs.map((s) => s.id));
+  const norm = (s) => ({ ...s, playlists: Array.isArray(s.playlists) ? s.playlists : [], createdAt: s.createdAt || Date.now(), lastPlayedAt: s.lastPlayedAt || 0, playCount: s.playCount || 0, album: s.album || "", artwork: s.artwork || "", duration: s.duration || 0, saavnId: s.saavnId || "", query: s.query || "", srcUrl: s.srcUrl || "" });
+  const incoming = payload.songs.filter((s) => s && s.id && !existingIds.has(s.id)).map(norm);
+  songs = [...incoming, ...songs];
+
+  // Merge playlists (union of names, keep "All songs" first).
+  const plSet = new Set(playlists);
+  (payload.playlists || []).forEach((p) => { if (p && !plSet.has(p)) { plSet.add(p); playlists.push(p); } });
+  if (!playlists.includes("All songs")) playlists.unshift("All songs");
+
+  // Merge playlist orders (fill any the incoming file has that we don't).
+  const po = payload.playlistOrders || {};
+  Object.keys(po).forEach((pl) => { if (!playlistOrders[pl]) playlistOrders[pl] = po[pl]; });
+  normalizePlaylistOrders();
+  saveMeta();
+  render();
+  showToast(`Imported ${incoming.length} records — fetching audio…`);
+  // Kick off audio re-download for anything we don't have a blob for.
+  await restoreMissingAudio();
+}
+
+/* Resolve a FRESH JioSaavn download URL from a stored saavnId (the stored URL is
+   time-limited, so we re-resolve by id). Tries each mirror. */
+async function resolveSaavnUrlById(saavnId) {
+  if (!saavnId) return "";
+  const ordered = [saavnPreferredMirror, ...SAAVN_MIRRORS.filter((m) => m !== saavnPreferredMirror)];
+  for (const mirror of ordered) {
+    try {
+      const res = await fetch(`${mirror}/songs/${encodeURIComponent(saavnId)}`, { signal: AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const item = data?.data ? (Array.isArray(data.data) ? data.data[0] : data.data) : null;
+      const dl = item?.downloadUrl || [];
+      const best = dl.length ? dl[dl.length - 1] : null;
+      if (best?.url) { saavnPreferredMirror = mirror; return best.url; }
+    } catch {}
+  }
+  return "";
+}
+
+/* Fallback: re-search JioSaavn by the stored query (or title+artist) and pick the
+   matching result's URL. */
+async function resolveSaavnUrlBySearch(song) {
+  const q = (song.query || `${song.title} ${song.artist || ""}`).trim();
+  if (!q) return "";
+  try {
+    const results = await fetchJioSaavnCandidates(q);
+    let m = song.saavnId ? results.find((r) => r.saavnId === song.saavnId) : null;
+    if (!m) m = results.find((r) => r.title.toLowerCase() === (song.title || "").toLowerCase() && (r.artist || "").toLowerCase() === (song.artist || "").toLowerCase());
+    if (!m) m = results[0];
+    return m?.url || "";
+  } catch { return ""; }
+}
+
+let restoreBusy = false;
+async function restoreMissingAudio() {
+  if (restoreBusy) { showToast("Already restoring…"); return; }
+  restoreBusy = true;
+  try {
+    // Which songs have no audio blob yet?
+    const missing = [];
+    for (const s of songs) {
+      const blob = await getBlob(s.id);
+      if (!blob) missing.push(s);
+    }
+    if (!missing.length) { dbg("restore: nothing missing"); return; }
+    dbg(`restore: ${missing.length} song(s) need audio`);
+    let done = 0; const manual = [];
+    for (let i = 0; i < missing.length; i++) {
+      const s = missing[i];
+      showToast(`Restoring ${i + 1}/${missing.length}: ${s.title}`);
+      let url = "";
+      if (s.source === "jiosaavn") {
+        url = await resolveSaavnUrlById(s.saavnId);
+        if (!url) url = await resolveSaavnUrlBySearch(s);
+      } else if (s.source === "web" && s.srcUrl) {
+        url = s.srcUrl; // best effort — the original link may have expired
+      }
+      // device imports (and anything without a key) can never be re-fetched
+      if (!url) { manual.push(s); s.needsReadd = true; saveMeta(); renderSongs(); dbg(`restore: no source for "${s.title}" (${s.source})`); continue; }
+      try {
+        const blob = await fetchAudioBlob(url, () => {});
+        await saveBlob(s.id, blob);
+        if (s.artwork) { try { await cacheArtworkFromUrl(s.id, s.artwork); } catch {} }
+        if (s.needsReadd) { delete s.needsReadd; }
+        done++; saveMeta(); render();
+        dbg(`restore: ok "${s.title}"`);
+      } catch (e) {
+        manual.push(s); s.needsReadd = true; saveMeta(); renderSongs();
+        dbg(`restore: download failed "${s.title}": ${e?.message || e}`);
+      }
+    }
+    if (manual.length) {
+      showToast(`Restored ${done}. ${manual.length} need manual re-add.`);
+      dbg(`restore: ${manual.length} need manual re-add: ${manual.map((m) => m.title).join(", ")}`);
+    } else {
+      showToast(`Restored all ${done} song(s)`);
+    }
+  } finally {
+    restoreBusy = false;
+  }
+}
+
 /* ══════════════ EVENT LISTENERS ══════════════ */
 nodes.searchForm.addEventListener("submit", async (e) => { e.preventDefault(); try { await searchRemoteSongs(nodes.searchQuery.value); } catch { remoteResults = []; renderRemoteResults(); showToast("Search failed"); } });
 nodes.urlForm.addEventListener("submit", async (e) => {
@@ -1373,6 +1503,8 @@ nodes.searchInput.addEventListener("input", () => { searchQuery = nodes.searchIn
 nodes.sortSelect.addEventListener("change", () => { sortMode = nodes.sortSelect.value; renderSongs(); });
 nodes.exportBackup.addEventListener("click", async () => { try { await exportBackup(); } catch { showToast("Export failed"); } });
 nodes.importBackupFile.addEventListener("change", async (e) => { const f = e.target.files?.[0]; if (!f) return; try { await importBackup(f); showToast("Imported"); } catch { showToast("Import failed"); } finally { nodes.importBackupFile.value = ""; } });
+nodes.exportLibrary.addEventListener("click", async () => { try { await exportLibrary(); } catch { showToast("Export failed"); } });
+nodes.importLibraryFile.addEventListener("change", async (e) => { const f = e.target.files?.[0]; if (!f) return; try { await importLibrary(f); } catch { showToast("Import failed"); } finally { nodes.importLibraryFile.value = ""; } });
 
 /* ══════════════ SERVICE WORKER ══════════════ */
 if ("serviceWorker" in navigator) {
