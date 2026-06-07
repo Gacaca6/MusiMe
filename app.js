@@ -756,11 +756,19 @@ async function playSong(song, startTime = 0) {
   catch (e) { dbg(`playSong play() rejected: ${e?.message || e}`); showToast("Tap play to start"); }
 }
 
-/* Update ONLY the lock-screen metadata (title/artist/art). Action handlers are
-   registered once, separately, so there is never a window where they're missing. */
-function updateMediaSession(song, localArt) {
+/* Update the lock-screen metadata, but ONLY rebuild the MediaMetadata object when
+   the song actually changes. Re-assigning navigator.mediaSession.metadata on every
+   resume/foreground makes iOS redraw the now-playing card — that was the flicker /
+   "appears to restart" the user saw. For the same song we only refresh positionState. */
+let mediaMetaSongId = null;
+function updateMediaSession(song, localArt, force = false) {
   if (!("mediaSession" in navigator)) return;
   registerMediaHandlers(); // idempotent — guarantees handlers exist
+  if (!force && song && song.id === mediaMetaSongId) {
+    // Same song already shown — don't touch metadata (no flicker), just position.
+    updatePositionState();
+    return;
+  }
   const artSrc = localArt || song.artwork || "";
   const artwork = [];
   if (artSrc) {
@@ -775,6 +783,7 @@ function updateMediaSession(song, localArt) {
       album: song.album || "MusiMe",
       artwork,
     });
+    mediaMetaSongId = song.id;
   } catch (e) {
     // Some iOS versions choke on blob: artwork URLs — retry with no artwork
     // rather than leaving the session without metadata.
@@ -785,6 +794,7 @@ function updateMediaSession(song, localArt) {
         artist: song.artist || "Unknown",
         album: song.album || "MusiMe",
       });
+      mediaMetaSongId = song.id;
     } catch {}
   }
   updatePositionState();
@@ -825,6 +835,24 @@ function readSavedTime() {
    audio session stays active across a locked pause, so resuming the main track
    renders immediately. Standalone PWA only — Safari resumes fine without it. */
 let keepAliveEl = null;
+
+/* ── Lock-screen control hardening ──────────────────────────────────────────
+   iOS re-dispatches media actions (we saw two "pause" events ~1s apart) and can
+   fire play/pause in quick succession. These guards make the handlers idempotent
+   and debounced so repeated/duplicate presses can never desync state or flicker. */
+let lastActionType = null;
+let lastActionAt = 0;
+let resumeInFlight = false;
+let renderProbeHandler = null;
+const ACTION_DEBOUNCE_MS = 600;
+function actionDebounced(type) {
+  const now = Date.now();
+  if (type === lastActionType && (now - lastActionAt) < ACTION_DEBOUNCE_MS) return true;
+  lastActionType = type;
+  lastActionAt = now;
+  return false;
+}
+
 function makeSilenceUrl(seconds) {
   const sr = 8000, n = Math.max(1, Math.floor(sr * seconds));
   const buf = new ArrayBuffer(44 + n * 2), dv = new DataView(buf);
@@ -862,6 +890,8 @@ function ensureKeepAlive() {
    unlock. Part of the diagnostics; safe to remove with the rest of the logging. */
 function armRenderProbe() {
   const a = nodes.audio;
+  // Single-instance: clear any previous probe so rapid toggles don't stack listeners.
+  if (renderProbeHandler) { a.removeEventListener("timeupdate", renderProbeHandler); renderProbeHandler = null; }
   const t0 = a.currentTime;
   const now = () => ((performance && performance.now) ? performance.now() : Date.now());
   const start = now();
@@ -869,10 +899,12 @@ function armRenderProbe() {
     if (Math.abs(a.currentTime - t0) > 0.05) {
       dbg(`render confirmed: t ${t0.toFixed(2)}->${a.currentTime.toFixed(2)} after ${(now() - start) | 0}ms hidden=${document.visibilityState === "hidden"}`);
       a.removeEventListener("timeupdate", onT);
+      if (renderProbeHandler === onT) renderProbeHandler = null;
     }
   };
+  renderProbeHandler = onT;
   a.addEventListener("timeupdate", onT);
-  setTimeout(() => a.removeEventListener("timeupdate", onT), 30000);
+  setTimeout(() => { a.removeEventListener("timeupdate", onT); if (renderProbeHandler === onT) renderProbeHandler = null; }, 30000);
 }
 
 /* The bulletproof resume routine used by the lock-screen "play" action and by
@@ -883,6 +915,16 @@ function armRenderProbe() {
    active. Rebuilds happen only in the foreground, where load() can complete. */
 async function resumePlayback() {
   const a = nodes.audio;
+  // Re-entrancy guard: ignore overlapping resume calls (rapid double-tap / a play
+  // dispatched while a previous resume is still settling) so they can't race.
+  if (resumeInFlight) { dbg("resumePlayback: ignored (already in flight)"); return; }
+  // Already playing and advancing — nothing to do; just confirm OS state.
+  if (!a.paused && !a.error && a.readyState >= 2) {
+    setPlayingState(true);
+    return;
+  }
+  resumeInFlight = true;
+  try {
   const hidden = document.visibilityState === "hidden"; // screen locked / app backgrounded
   ensureKeepAlive(); // (re)start the silent session-holder
   const dead = !a.src || a.error !== null || a.readyState === 0; // HAVE_NOTHING
@@ -933,6 +975,9 @@ async function resumePlayback() {
     // Could not start audio — keep the UI honest rather than claiming "playing".
     setPlayingState(false);
   }
+  } finally {
+    resumeInFlight = false;
+  }
 }
 
 /* Register the Media Session action handlers exactly once. They read live module
@@ -942,9 +987,24 @@ function registerMediaHandlers() {
   const ms = navigator.mediaSession;
   const set = (action, fn) => { try { ms.setActionHandler(action, fn); } catch {} };
 
-  set("play", () => { dbg("ACTION play"); resumePlayback(); });
+  set("play", () => {
+    // Debounce duplicate play dispatches; ignore if already genuinely playing.
+    if (actionDebounced("play")) { dbg("ACTION play (debounced)"); return; }
+    dbg("ACTION play");
+    if (!nodes.audio.paused && nodes.audio.readyState >= 2 && !nodes.audio.error) {
+      // Already playing — just make sure the OS reflects it, no churn.
+      setPlayingState(true);
+      return;
+    }
+    resumePlayback();
+  });
   set("pause", () => {
+    // Debounce iOS's habit of re-dispatching pause ~1s later, and make it
+    // idempotent: if the element is already paused, do nothing that causes churn.
+    if (actionDebounced("pause")) { dbg("ACTION pause (debounced)"); return; }
     dbg(`ACTION pause: ${audioStateStr()}`);
+    ensureKeepAlive(); // keep the audio session warm so the next resume renders
+    if (nodes.audio.paused) { setPlayingState(false); return; }
     try { nodes.audio.pause(); } catch {}
     setPlayingState(false);
     savePlaybackState();
@@ -990,11 +1050,12 @@ function setPlayingState(playing) {
   nodes.miniPauseIcon.classList.toggle("hidden", !playing);
   nodes.npPlayIcon.classList.toggle("hidden", playing);
   nodes.npPauseIcon.classList.toggle("hidden", !playing);
-  // Keep the OS lock-screen / notification controls in sync. Without this the
-  // OS doesn't know the player is paused and may not dispatch the "play" action
-  // when the user taps the lock-screen play button.
+  // Keep the OS lock-screen / notification controls in sync — but only WRITE when
+  // the value actually changes. Re-writing the same playbackState makes iOS redraw
+  // the now-playing card (flicker), and iOS re-dispatches pause when it sees churn.
   if ("mediaSession" in navigator) {
-    navigator.mediaSession.playbackState = playing ? "playing" : "paused";
+    const want = playing ? "playing" : "paused";
+    if (navigator.mediaSession.playbackState !== want) navigator.mediaSession.playbackState = want;
   }
   updatePositionState();
 }
