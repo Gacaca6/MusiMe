@@ -711,6 +711,7 @@ async function playSong(song, startTime = 0) {
   const blob = await getBlob(song.id);
   if (!blob) { showToast("Song file not found"); dbg(`playSong: blob missing for ${song.id}`); return; }
   wasSuspended = false; // a fresh source attach re-primes the audio route
+  ensureKeepAlive();    // start the silent session-holder within this user gesture
   // Revoke the PREVIOUS url only — never the one we're about to use.
   if (currentObjectUrl) { try { URL.revokeObjectURL(currentObjectUrl); } catch {} }
   currentBlob = blob; // keep in memory for synchronous lock-screen resume
@@ -815,42 +816,95 @@ function readSavedTime() {
   return 0;
 }
 
+/* ── SILENT KEEP-ALIVE ──────────────────────────────────────────────────────
+   The core of the "armed but silent until unlock" fix. On iOS, once the MAIN
+   element is paused while the screen is locked, iOS deactivates the app's audio
+   session; a later play() is then queued but not RENDERED until the screen
+   wakes. We prevent that by keeping a second, silent <audio> looping forever
+   from the first user-initiated play. Because that element never stops, the iOS
+   audio session stays active across a locked pause, so resuming the main track
+   renders immediately. Standalone PWA only — Safari resumes fine without it. */
+let keepAliveEl = null;
+function makeSilenceUrl(seconds) {
+  const sr = 8000, n = Math.max(1, Math.floor(sr * seconds));
+  const buf = new ArrayBuffer(44 + n * 2), dv = new DataView(buf);
+  const ws = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+  ws(0, "RIFF"); dv.setUint32(4, 36 + n * 2, true); ws(8, "WAVE"); ws(12, "fmt ");
+  dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+  dv.setUint32(24, sr, true); dv.setUint32(28, sr * 2, true); dv.setUint16(32, 2, true);
+  dv.setUint16(34, 16, true); ws(36, "data"); dv.setUint32(40, n * 2, true);
+  // sample bytes left as zeros == pure silence
+  return URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+}
+function ensureKeepAlive() {
+  if (!IS_STANDALONE) return; // Safari resumes fine without a session-holder
+  if (!keepAliveEl) {
+    keepAliveEl = document.createElement("audio");
+    keepAliveEl.loop = true;
+    keepAliveEl.preload = "auto";
+    keepAliveEl.setAttribute("playsinline", "");
+    keepAliveEl.setAttribute("aria-hidden", "true");
+    keepAliveEl.volume = 1; // samples are silent, so this stays inaudible
+    keepAliveEl.style.display = "none";
+    keepAliveEl.src = makeSilenceUrl(0.5);
+    document.body.appendChild(keepAliveEl);
+    dbg("keepAlive created");
+  }
+  if (keepAliveEl.paused) {
+    const p = keepAliveEl.play();
+    if (p && p.catch) p.catch((e) => dbg(`keepAlive play rejected: ${e?.message || e}`));
+  }
+}
+
+/* One-shot probe that logs whether/when the MAIN element's currentTime actually
+   advances after a resume, and whether the screen was still locked at that
+   instant — this is how we confirm audio truly renders while locked vs. only on
+   unlock. Part of the diagnostics; safe to remove with the rest of the logging. */
+function armRenderProbe() {
+  const a = nodes.audio;
+  const t0 = a.currentTime;
+  const now = () => ((performance && performance.now) ? performance.now() : Date.now());
+  const start = now();
+  const onT = () => {
+    if (Math.abs(a.currentTime - t0) > 0.05) {
+      dbg(`render confirmed: t ${t0.toFixed(2)}->${a.currentTime.toFixed(2)} after ${(now() - start) | 0}ms hidden=${document.visibilityState === "hidden"}`);
+      a.removeEventListener("timeupdate", onT);
+    }
+  };
+  a.addEventListener("timeupdate", onT);
+  setTimeout(() => a.removeEventListener("timeupdate", onT), 30000);
+}
+
 /* The bulletproof resume routine used by the lock-screen "play" action and by
-   in-app play. Strategy, all keeping iOS user-activation alive:
-   1. Decide whether the element needs re-priming. It does when the source is
-      dead, OR — crucially for installed PWAs — when we're in standalone mode and
-      the app was suspended, because iOS silently decouples a "healthy"-looking
-      <audio> element from the audio route during standalone suspension. In that
-      case play() resolves but produces NO sound, so we must re-attach the source.
-   2. Re-prime SYNCHRONOUSLY from the in-memory blob, restore position, then
-      play() — no async work before play() so activation survives.
-   3. Fall back to the async IndexedDB reload only if the in-memory blob is gone.
-   4. Always reconcile the UI to the truth: only report "playing" if play()
-      actually succeeded; otherwise show paused so the UI never lies. */
+   in-app play. Key iOS rule encoded here: while the screen is LOCKED (document
+   hidden), NEVER do a destructive load()/rebuild — iOS defers it until unlock,
+   which is the "silent until unlock" bug. When hidden we do the lightest resume
+   (plain play()) and rely on the silent keep-alive having held the audio session
+   active. Rebuilds happen only in the foreground, where load() can complete. */
 async function resumePlayback() {
   const a = nodes.audio;
+  const hidden = document.visibilityState === "hidden"; // screen locked / app backgrounded
+  ensureKeepAlive(); // (re)start the silent session-holder
   const dead = !a.src || a.error !== null || a.readyState === 0; // HAVE_NOTHING
-  const standaloneStale = IS_STANDALONE && wasSuspended; // route likely decoupled
-  dbg(`resumePlayback: standalone=${IS_STANDALONE} wasSuspended=${wasSuspended} dead=${dead} ${audioStateStr()}`);
+  const standaloneStale = IS_STANDALONE && wasSuspended;
+  dbg(`resumePlayback: hidden=${hidden} standalone=${IS_STANDALONE} wasSuspended=${wasSuspended} dead=${dead} ${audioStateStr()}`);
 
   let savedTime = a.currentTime || 0;
   if (savedTime === 0) savedTime = readSavedTime();
 
-  if (dead || standaloneStale) {
+  const allowRebuild = !hidden; // load() while locked is deferred by iOS — avoid it
+
+  if ((dead || standaloneStale) && allowRebuild) {
     const rebuilt = rebuildSourceSync(); // synchronous — re-attaches audio route
     if (rebuilt) {
       if (savedTime > 0) {
         a.addEventListener("loadedmetadata", () => { try { a.currentTime = savedTime; } catch {} }, { once: true });
       }
-      // Re-establish lock-screen metadata/handlers for the re-attached element
-      // (standalone iOS can drop these across a suspension).
       if (currentSongId) {
         const s = songs.find((x) => x.id === currentSongId);
         if (s) { try { updateMediaSession(s, getArtUrl(s)); } catch {} }
       }
     } else if (currentSongId) {
-      // No in-memory blob (e.g. fresh page reload that hasn't restored yet) —
-      // async reload from IndexedDB as a last resort.
       const s = songs.find((x) => x.id === currentSongId);
       if (s) { dbg("resumePlayback: async DB reload"); await playSong(s, savedTime); wasSuspended = false; return; }
       dbg("resumePlayback: nothing to resume");
@@ -858,16 +912,18 @@ async function resumePlayback() {
     }
   }
 
-  // play() is INVOKED synchronously here (nothing async ran before it), so the
-  // media-key user-activation is still valid even though we await the result.
+  armRenderProbe(); // confirm (via the log) whether audio truly renders while locked
+
+  // play() is INVOKED synchronously here, so the media-key user-activation holds.
   try {
     await a.play();
     wasSuspended = false;
     setPlayingState(true);
     dbg(`resume play ok: ${audioStateStr()}`);
   } catch (e) {
-    dbg(`resume play() rejected: ${e?.message || e} — async fallback`);
-    if (currentSongId) {
+    dbg(`resume play() rejected: ${e?.message || e}`);
+    // Only attempt the heavy async reload when foreground (load() works there).
+    if (!hidden && currentSongId) {
       const s = songs.find((x) => x.id === currentSongId);
       if (s) {
         try { await playSong(s, savedTime); wasSuspended = false; return; }
@@ -1216,7 +1272,35 @@ nodes.exportBackup.addEventListener("click", async () => { try { await exportBac
 nodes.importBackupFile.addEventListener("change", async (e) => { const f = e.target.files?.[0]; if (!f) return; try { await importBackup(f); showToast("Imported"); } catch { showToast("Import failed"); } finally { nodes.importBackupFile.value = ""; } });
 
 /* ══════════════ SERVICE WORKER ══════════════ */
-if ("serviceWorker" in navigator) { window.addEventListener("load", () => { navigator.serviceWorker.register("./sw.js").catch(() => {}); }); }
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./sw.js").then((reg) => {
+      try { reg.update(); } catch {}
+      reg.addEventListener("updatefound", () => {
+        const nw = reg.installing;
+        if (!nw) return;
+        nw.addEventListener("statechange", () => {
+          if (nw.state === "installed" && navigator.serviceWorker.controller) {
+            dbg("new SW installed");
+            // Reload ONCE to run fresh code — but never interrupt active playback,
+            // and guard against reload loops within a session.
+            if (!isPlaying && !sessionStorage.getItem("musime-sw-reloaded")) {
+              sessionStorage.setItem("musime-sw-reloaded", "1");
+              dbg("reloading for fresh code");
+              location.reload();
+            }
+          }
+        });
+      });
+    }).catch(() => {});
+    // Re-check for updates whenever the app returns to the foreground.
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        navigator.serviceWorker.getRegistration().then((r) => { if (r) { try { r.update(); } catch {} } }).catch(() => {});
+      }
+    });
+  });
+}
 
 /* ══════════════ STORAGE INFO ══════════════ */
 async function updateStorageInfo() {
