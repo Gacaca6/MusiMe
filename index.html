@@ -149,6 +149,16 @@
           <p><strong>Add to Home Screen</strong> for reliable offline playback. Browser tabs can lose stored songs after inactivity.</p>
           <button id="dismiss-banner" class="pill-btn" type="button">Got it</button>
         </div>
+        <!-- Playback Diagnostics (removable) -->
+        <section class="settings-section">
+          <h3>Playback Diagnostics</h3>
+          <p class="hint" style="margin-bottom:0.6rem">If lock-screen play/pause misbehaves, reproduce it on your phone, then tap <strong>Show Log</strong> and share the output.</p>
+          <div class="backup-row">
+            <button id="show-debug-log" type="button" class="pill-btn wide">Show Log</button>
+            <button id="clear-debug-log" type="button" class="pill-btn wide">Clear Log</button>
+          </div>
+          <pre id="debug-log-output" class="hidden" style="white-space:pre-wrap;word-break:break-word;font-size:0.7rem;line-height:1.35;background:rgba(0,0,0,0.35);border-radius:0.5rem;padding:0.6rem;margin-top:0.6rem;max-height:40vh;overflow:auto;"></pre>
+        </section>
       </div>
 
     </div><!-- /app-shell -->

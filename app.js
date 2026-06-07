@@ -25,6 +25,11 @@ let favoritesOnly = false;
 let searchQuery = "";
 let sortMode = "newest";
 let currentObjectUrl = null;
+let currentBlob = null; // In-memory copy of the playing song's Blob so we can
+                        // rebuild the audio source SYNCHRONOUSLY (no async
+                        // IndexedDB read) inside a Media Session action handler,
+                        // preserving iOS user-activation for resume.
+let mediaHandlersRegistered = false;
 let downloadQueue = [];
 let queueBusy = false;
 let remoteResults = [];
@@ -280,6 +285,30 @@ function slugify(t) { return t.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").
 function createId() { return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`; }
 function formatTime(sec) { if (!sec || !isFinite(sec)) return "0:00"; return `${Math.floor(sec / 60)}:${Math.floor(sec % 60).toString().padStart(2, "0")}`; }
 function decodeHtml(html) { const el = document.createElement("textarea"); el.innerHTML = html; return el.value; }
+
+/* ══════════════ DIAGNOSTIC LOG (removable) ══════════════
+   Lightweight ring buffer persisted to localStorage so we can capture what
+   actually happens on the locked phone (where the dev console isn't visible)
+   and even survive an iOS page reload. View via Settings → Playback Diagnostics
+   or window.__musimeLog() in a remote debugger. Safe to delete this whole block
+   plus its callers once the lock-screen issue is confirmed fixed.
+*/
+const DEBUG_LOG_KEY = "musime-debug-log";
+let debugBuffer = [];
+try { debugBuffer = JSON.parse(localStorage.getItem(DEBUG_LOG_KEY) || "[]"); } catch { debugBuffer = []; }
+function dbg(msg) {
+  const line = `${new Date().toISOString().slice(11, 23)} ${msg}`;
+  debugBuffer.push(line);
+  if (debugBuffer.length > 120) debugBuffer.shift();
+  try { localStorage.setItem(DEBUG_LOG_KEY, JSON.stringify(debugBuffer)); } catch {}
+  try { console.log("[MusiMe]", msg); } catch {}
+}
+function audioStateStr() {
+  const a = nodes.audio;
+  return `src=${a.src ? "set" : "empty"} paused=${a.paused} rs=${a.readyState} err=${a.error ? a.error.code : "none"} t=${(a.currentTime || 0).toFixed(1)} ps=${("mediaSession" in navigator) ? navigator.mediaSession.playbackState : "n/a"}`;
+}
+window.__musimeLog = () => debugBuffer.join("\n");
+window.__musimeClearLog = () => { debugBuffer = []; try { localStorage.removeItem(DEBUG_LOG_KEY); } catch {} };
 
 /* ══════════════ JIOSAAVN API (with mirror fallback) ══════════════
    JioSaavn has surprisingly strong Rwandan gospel coverage including
@@ -626,10 +655,12 @@ async function restorePlaybackState() {
     if (!song) return;
     const blob = await getBlob(song.id);
     if (!blob) return;
-    if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
+    if (currentObjectUrl) { try { URL.revokeObjectURL(currentObjectUrl); } catch {} }
+    currentBlob = blob; // keep in memory for synchronous resume recovery
     currentObjectUrl = URL.createObjectURL(blob);
     nodes.audio.src = currentObjectUrl;
     currentSongId = song.id;
+    dbg(`restore: song=${song.id} savedT=${(state.currentTime || 0).toFixed(1)}`);
 
     // Seek to the saved position once metadata loads
     nodes.audio.addEventListener("loadedmetadata", () => {
@@ -668,13 +699,24 @@ function getPlaylist() {
   return shuffled;
 }
 
-async function playSong(song) {
+async function playSong(song, startTime = 0) {
   const blob = await getBlob(song.id);
-  if (!blob) { showToast("Song file not found"); return; }
-  if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
+  if (!blob) { showToast("Song file not found"); dbg(`playSong: blob missing for ${song.id}`); return; }
+  // Revoke the PREVIOUS url only — never the one we're about to use.
+  if (currentObjectUrl) { try { URL.revokeObjectURL(currentObjectUrl); } catch {} }
+  currentBlob = blob; // keep in memory for synchronous lock-screen resume
   currentObjectUrl = URL.createObjectURL(blob);
   nodes.audio.src = currentObjectUrl;
+  nodes.audio.load();
   currentSongId = song.id;
+  dbg(`playSong: ${song.id} startT=${startTime}`);
+
+  // Optional resume position (used by recovery paths)
+  if (startTime > 0) {
+    nodes.audio.addEventListener("loadedmetadata", () => {
+      try { nodes.audio.currentTime = startTime; } catch {}
+    }, { once: true });
+  }
 
   const localArt = getArtUrl(song);
 
@@ -695,16 +737,20 @@ async function playSong(song) {
   const ref = songs.find((s) => s.id === song.id);
   if (ref) { ref.lastPlayedAt = Date.now(); ref.playCount = (ref.playCount || 0) + 1; saveMeta(); renderRecent(); renderSongs(); }
 
-  // Media Session — use local art for lock screen too
-  updateMediaSession(song, localArt);
+  // Media Session — use local art for lock screen too. Wrapped so a
+  // MediaMetadata/artwork failure can NEVER prevent playback.
+  try { updateMediaSession(song, localArt); } catch (e) { dbg(`updateMediaSession threw: ${e?.message || e}`); }
   renderNpQueue();
 
-  try { await nodes.audio.play(); setPlayingState(true); }
-  catch { showToast("Tap play to start"); }
+  try { await nodes.audio.play(); setPlayingState(true); dbg(`play ok: ${audioStateStr()}`); }
+  catch (e) { dbg(`playSong play() rejected: ${e?.message || e}`); showToast("Tap play to start"); }
 }
 
+/* Update ONLY the lock-screen metadata (title/artist/art). Action handlers are
+   registered once, separately, so there is never a window where they're missing. */
 function updateMediaSession(song, localArt) {
   if (!("mediaSession" in navigator)) return;
+  registerMediaHandlers(); // idempotent — guarantees handlers exist
   const artSrc = localArt || song.artwork || "";
   const artwork = [];
   if (artSrc) {
@@ -712,68 +758,145 @@ function updateMediaSession(song, localArt) {
     artwork.push({ src: artSrc, sizes: "256x256", type: "image/jpeg" });
     artwork.push({ src: artSrc, sizes: "512x512", type: "image/jpeg" });
   }
-  navigator.mediaSession.metadata = new MediaMetadata({
-    title: song.title,
-    artist: song.artist || "Unknown",
-    album: song.album || "MusiMe",
-    artwork,
-  });
-  // Bulletproof play handler: if the audio element lost its src
-  // (iOS Safari sometimes does this when the page is suspended),
-  // reload the song from IndexedDB before playing.
-  // Also handles the case where the src string is still set but the underlying
-  // Blob was evicted by iOS after the page was paused — detectable via
-  // readyState === HAVE_NOTHING or a non-null error on the element.
-  navigator.mediaSession.setActionHandler("play", async () => {
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: song.title,
+      artist: song.artist || "Unknown",
+      album: song.album || "MusiMe",
+      artwork,
+    });
+  } catch (e) {
+    // Some iOS versions choke on blob: artwork URLs — retry with no artwork
+    // rather than leaving the session without metadata.
+    dbg(`MediaMetadata threw (${e?.message || e}) — retrying without artwork`);
     try {
-      const srcLost = !nodes.audio.src
-        || nodes.audio.error !== null
-        || nodes.audio.readyState === HTMLMediaElement.HAVE_NOTHING;
-      if (srcLost && currentSongId) {
-        const s = songs.find((x) => x.id === currentSongId);
-        if (s) {
-          // Recover saved position so resume continues from the right spot
-          let savedTime = 0;
-          try {
-            const raw = localStorage.getItem(PLAYBACK_KEY);
-            if (raw) { const st = JSON.parse(raw); if (st.songId === s.id) savedTime = st.currentTime || 0; }
-          } catch {}
-          await playSong(s);
-          if (savedTime > 0) { try { nodes.audio.currentTime = savedTime; } catch {} }
-          return;
-        }
-      }
-      await nodes.audio.play();
-      setPlayingState(true);
-    } catch {
-      // Last-resort recovery: reload from current song id
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: song.title,
+        artist: song.artist || "Unknown",
+        album: song.album || "MusiMe",
+      });
+    } catch {}
+  }
+  updatePositionState();
+}
+
+/* Rebuild the audio source from the IN-MEMORY blob — SYNCHRONOUS, no IndexedDB
+   await — so it can run inside a Media Session handler without losing the iOS
+   user-activation needed for play(). Returns true if a source was set. */
+function rebuildSourceSync() {
+  if (!currentBlob) { dbg("rebuildSourceSync: no in-memory blob"); return false; }
+  try {
+    if (currentObjectUrl) { try { URL.revokeObjectURL(currentObjectUrl); } catch {} }
+    currentObjectUrl = URL.createObjectURL(currentBlob);
+    nodes.audio.src = currentObjectUrl;
+    nodes.audio.load();
+    dbg("rebuildSourceSync: source rebuilt from memory");
+    return true;
+  } catch (e) {
+    dbg(`rebuildSourceSync failed: ${e?.message || e}`);
+    return false;
+  }
+}
+
+function readSavedTime() {
+  try {
+    const raw = localStorage.getItem(PLAYBACK_KEY);
+    if (raw) { const st = JSON.parse(raw); if (st.songId === currentSongId) return st.currentTime || 0; }
+  } catch {}
+  return 0;
+}
+
+/* The bulletproof resume routine used by the lock-screen "play" action.
+   Strategy, in order, all keeping iOS activation alive where possible:
+   1. If the source is healthy, just play().
+   2. If the source is dead but we have the blob in memory, rebuild it
+      synchronously, restore position, then play() — NO await before play().
+   3. Only as a last resort fall back to the async IndexedDB reload. */
+async function resumePlayback() {
+  const a = nodes.audio;
+  dbg(`resumePlayback: ${audioStateStr()}`);
+  const dead = !a.src || a.error !== null || a.readyState === 0; // HAVE_NOTHING
+  let savedTime = a.currentTime || 0;
+
+  if (dead) {
+    if (savedTime === 0) savedTime = readSavedTime();
+    const rebuilt = rebuildSourceSync();
+    if (rebuilt && savedTime > 0) {
+      a.addEventListener("loadedmetadata", () => { try { a.currentTime = savedTime; } catch {} }, { once: true });
+    }
+    if (!rebuilt) {
+      // No in-memory blob (e.g. fresh page reload that hasn't restored yet) —
+      // async reload. Activation may be lost, but it's the only option left.
       if (currentSongId) {
         const s = songs.find((x) => x.id === currentSongId);
-        if (s) { try { await playSong(s); } catch {} }
+        if (s) { dbg("resumePlayback: async DB reload"); await playSong(s, savedTime || readSavedTime()); return; }
       }
+      dbg("resumePlayback: nothing to resume");
+      return;
     }
-  });
-  navigator.mediaSession.setActionHandler("pause", () => {
+  }
+
+  // Call play() with NO await before it in the rebuilt path (activation intact).
+  const p = a.play();
+  if (p && typeof p.then === "function") {
+    p.then(() => { setPlayingState(true); dbg(`resume play ok: ${audioStateStr()}`); })
+     .catch(async (e) => {
+       dbg(`resume play() rejected: ${e?.message || e} — async fallback`);
+       if (currentSongId) {
+         const s = songs.find((x) => x.id === currentSongId);
+         if (s) { try { await playSong(s, savedTime || readSavedTime()); } catch (e2) { dbg(`fallback failed: ${e2?.message || e2}`); } }
+       }
+     });
+  } else {
+    setPlayingState(true);
+  }
+}
+
+/* Register the Media Session action handlers exactly once. They read live module
+   state (currentSongId, currentBlob, nodes.audio) so they never go stale. */
+function registerMediaHandlers() {
+  if (mediaHandlersRegistered || !("mediaSession" in navigator)) return;
+  const ms = navigator.mediaSession;
+  const set = (action, fn) => { try { ms.setActionHandler(action, fn); } catch {} };
+
+  set("play", () => { dbg("ACTION play"); resumePlayback(); });
+  set("pause", () => {
+    dbg(`ACTION pause: ${audioStateStr()}`);
     try { nodes.audio.pause(); } catch {}
     setPlayingState(false);
     savePlaybackState();
   });
-  navigator.mediaSession.setActionHandler("previoustrack", () => playNext(-1));
-  navigator.mediaSession.setActionHandler("nexttrack", () => playNext(1));
-  try {
-    navigator.mediaSession.setActionHandler("seekto", (details) => {
-      if (details.seekTime != null) nodes.audio.currentTime = details.seekTime;
-    });
-  } catch {}
+  set("previoustrack", () => { dbg("ACTION previoustrack"); playNext(-1); });
+  set("nexttrack", () => { dbg("ACTION nexttrack"); playNext(1); });
+  set("seekto", (details) => {
+    if (details && details.seekTime != null) {
+      try { nodes.audio.currentTime = details.seekTime; } catch {}
+      updatePositionState();
+    }
+  });
+  set("seekbackward", (details) => {
+    const skip = (details && details.seekOffset) || 10;
+    try { nodes.audio.currentTime = Math.max(0, nodes.audio.currentTime - skip); } catch {}
+  });
+  set("seekforward", (details) => {
+    const skip = (details && details.seekOffset) || 10;
+    try { nodes.audio.currentTime = Math.min(nodes.audio.duration || 0, nodes.audio.currentTime + skip); } catch {}
+  });
+  set("stop", () => { dbg("ACTION stop"); try { nodes.audio.pause(); } catch {} setPlayingState(false); savePlaybackState(); });
+
+  mediaHandlersRegistered = true;
+  dbg("media handlers registered");
 }
 
 function updatePositionState() {
-  if (!("mediaSession" in navigator) || !nodes.audio.duration) return;
+  if (!("mediaSession" in navigator) || !navigator.mediaSession.setPositionState) return;
+  const d = nodes.audio.duration;
+  if (!d || !isFinite(d)) return;
   try {
     navigator.mediaSession.setPositionState({
-      duration: nodes.audio.duration,
-      playbackRate: nodes.audio.playbackRate,
-      position: nodes.audio.currentTime,
+      duration: d,
+      playbackRate: nodes.audio.playbackRate || 1,
+      position: Math.min(nodes.audio.currentTime || 0, d),
     });
   } catch {}
 }
@@ -790,12 +913,18 @@ function setPlayingState(playing) {
   if ("mediaSession" in navigator) {
     navigator.mediaSession.playbackState = playing ? "playing" : "paused";
   }
+  updatePositionState();
 }
 
 function togglePlayPause() {
-  if (!nodes.audio.src) return;
-  if (nodes.audio.paused) { nodes.audio.play(); setPlayingState(true); }
-  else { nodes.audio.pause(); setPlayingState(false); }
+  // If we have no source at all but know the current song, recover.
+  if (!nodes.audio.src && !currentSongId) return;
+  if (nodes.audio.paused) {
+    resumePlayback();
+  } else {
+    nodes.audio.pause();
+    setPlayingState(false);
+  }
 }
 
 function playNext(direction = 1) {
@@ -818,12 +947,22 @@ function playNext(direction = 1) {
 }
 
 // Audio events
-nodes.audio.addEventListener("play", () => setPlayingState(true));
+nodes.audio.addEventListener("play", () => { setPlayingState(true); });
+nodes.audio.addEventListener("playing", () => { setPlayingState(true); updatePositionState(); });
 nodes.audio.addEventListener("pause", () => { setPlayingState(false); savePlaybackState(); });
 nodes.audio.addEventListener("ended", () => {
   if (repeatMode === "one") { nodes.audio.currentTime = 0; nodes.audio.play(); return; }
   playNext(1);
 });
+// If the media element errors (e.g. iOS tore down a backgrounded blob source),
+// proactively rebuild from the in-memory blob so the next resume works.
+nodes.audio.addEventListener("error", () => {
+  const code = nodes.audio.error ? nodes.audio.error.code : "?";
+  dbg(`audio error code=${code} — rebuilding source from memory`);
+  if (currentBlob) rebuildSourceSync();
+});
+nodes.audio.addEventListener("stalled", () => dbg(`audio stalled: ${audioStateStr()}`));
+nodes.audio.addEventListener("loadeddata", () => dbg(`audio loadeddata: ${audioStateStr()}`));
 nodes.audio.addEventListener("timeupdate", () => {
   const { currentTime, duration } = nodes.audio;
   if (!duration) return;
@@ -838,7 +977,19 @@ nodes.audio.addEventListener("timeupdate", () => {
 
 // Save state when page is hidden/closed (handles iOS suspend & app close)
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "hidden") savePlaybackState();
+  if (document.visibilityState === "hidden") {
+    savePlaybackState();
+    dbg(`hidden: ${audioStateStr()}`);
+  } else {
+    // Returned to foreground — iOS may have dropped the session. Re-assert
+    // metadata + handlers + playbackState so lock-screen controls keep working.
+    dbg(`visible: ${audioStateStr()}`);
+    if (currentSongId) {
+      const s = songs.find((x) => x.id === currentSongId);
+      if (s) { try { updateMediaSession(s, getArtUrl(s)); } catch {} }
+      setPlayingState(!nodes.audio.paused);
+    }
+  }
 });
 window.addEventListener("pagehide", savePlaybackState);
 window.addEventListener("beforeunload", savePlaybackState);
@@ -1071,8 +1222,12 @@ async function requestPersistence() {
 }
 
 /* ══════════════ INIT ══════════════ */
+dbg(`=== page load (standalone=${window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true}) ===`);
 loadMeta();
 render(); // Initial render with remote URLs (may show if online)
+// Register lock-screen handlers as early as possible so a media-key press that
+// wakes the app is far less likely to be missed while we finish initializing.
+registerMediaHandlers();
 
 // Then load local artwork from IndexedDB and re-render with offline-safe URLs
 (async function init() {
@@ -1085,4 +1240,17 @@ render(); // Initial render with remote URLs (may show if online)
   requestPersistence();
   // Migrate artwork for existing songs that were downloaded before this update
   migrateArtwork();
+})();
+
+/* ══════════════ DIAGNOSTICS UI (removable) ══════════════ */
+(function wireDebugUi() {
+  const showBtn = $("show-debug-log");
+  const clearBtn = $("clear-debug-log");
+  const out = $("debug-log-output");
+  if (!showBtn || !out) return;
+  showBtn.addEventListener("click", () => {
+    out.textContent = debugBuffer.length ? debugBuffer.join("\n") : "(log is empty)";
+    out.classList.toggle("hidden");
+  });
+  if (clearBtn) clearBtn.addEventListener("click", () => { window.__musimeClearLog(); out.textContent = "(cleared)"; });
 })();
