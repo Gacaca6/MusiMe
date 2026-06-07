@@ -918,13 +918,15 @@ function armRenderProbe() {
    which is the "silent until unlock" bug. When hidden we do the lightest resume
    (plain play()) and rely on the silent keep-alive having held the audio session
    active. Rebuilds happen only in the foreground, where load() can complete. */
-async function resumePlayback() {
+async function resumePlayback(forceReprime = false) {
   const a = nodes.audio;
   // Re-entrancy guard: ignore overlapping resume calls (rapid double-tap / a play
   // dispatched while a previous resume is still settling) so they can't race.
   if (resumeInFlight) { dbg("resumePlayback: ignored (already in flight)"); return; }
   // Already playing and advancing — nothing to do; just confirm OS state.
-  if (!a.paused && !a.error && a.readyState >= 2) {
+  // Skipped when forceReprime: the on-visible auto-heal has CONFIRMED the element
+  // is stuck/silent and explicitly wants a rebuild even though it looks healthy.
+  if (!forceReprime && !a.paused && !a.error && a.readyState >= 2) {
     setPlayingState(true);
     return;
   }
@@ -933,15 +935,20 @@ async function resumePlayback() {
   const hidden = document.visibilityState === "hidden"; // screen locked / app backgrounded
   ensureKeepAlive(); // (re)start the silent session-holder
   const dead = !a.src || a.error !== null || a.readyState === 0; // HAVE_NOTHING
-  const standaloneStale = IS_STANDALONE && wasSuspended;
   dbg(`resumePlayback: hidden=${hidden} standalone=${IS_STANDALONE} wasSuspended=${wasSuspended} dead=${dead} ${audioStateStr()}`);
 
   let savedTime = a.currentTime || 0;
   if (savedTime === 0) savedTime = readSavedTime();
 
+  // Rebuild ONLY when the source is genuinely dead. A healthy foreground/after-unlock
+  // resume (src set, rs>=2, no error) must NOT rebuild: the rebuild momentarily resets
+  // currentTime to 0, which was the residual position flicker. The silent keep-alive
+  // holds the iOS audio session across suspension, so a healthy element resumes with a
+  // plain play(). NOTE: the locked path never rebuilds anyway (allowRebuild=false when
+  // hidden) — this change only affects foreground, so locked-resume behavior is untouched.
   const allowRebuild = !hidden; // load() while locked is deferred by iOS — avoid it
 
-  if ((dead || standaloneStale) && allowRebuild) {
+  if ((dead || forceReprime) && allowRebuild) {
     const rebuilt = rebuildSourceSync(); // synchronous — re-attaches audio route
     if (rebuilt) {
       if (savedTime > 0) {
@@ -1179,7 +1186,8 @@ async function reconcileOnVisible() {
     const advanced = !a.paused && Math.abs(a.currentTime - t0) > 0.01;
     if (!advanced) {
       dbg(`visible: playback stuck/silent (t0=${t0.toFixed(2)} t1=${a.currentTime.toFixed(2)} paused=${a.paused}) — re-priming`);
-      resumePlayback(); // re-attach route + play; reconciles UI to the result
+      resumePlayback(true); // CONFIRMED stuck — force a rebuild even though the
+                            // element looks healthy (preserves the v10 safety net)
       return;
     }
   }
