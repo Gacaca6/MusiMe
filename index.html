@@ -129,6 +129,19 @@
             <span>Tap to select audio files</span>
           </label>
         </section>
+        <section class="settings-section hidden" id="cloud-sync-section">
+          <h3>Cloud Sync</h3>
+          <p class="hint" style="margin-bottom:0.6rem">Sign in to automatically back up your library (songs list, playlists, favorites — no audio) to your account. On a new device, sign in and it pulls your library back and re-downloads the songs.</p>
+          <p id="cloud-sync-status" class="hint" style="margin-bottom:0.6rem">Not signed in</p>
+          <div id="gsi-button"></div>
+          <div id="cloud-sync-signed-in" class="hidden">
+            <p class="hint" style="margin-bottom:0.6rem">Signed in as <strong id="cloud-sync-email"></strong></p>
+            <div class="backup-row">
+              <button id="sync-now-btn" type="button" class="pill-btn wide">Sync Now</button>
+              <button id="sign-out-btn" type="button" class="pill-btn wide">Sign Out</button>
+            </div>
+          </div>
+        </section>
         <section class="settings-section">
           <h3>Library Sync</h3>
           <p class="hint" style="margin-bottom:0.6rem">Save a small file of your library (songs list, playlists, favorites — no audio). If you reinstall, import it to rebuild your library and auto re-download the songs.</p>

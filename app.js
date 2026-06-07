@@ -6,6 +6,29 @@ const PLAYLIST_ORDERS_KEY = "musime-playlist-orders";
 const PLAYBACK_KEY = "musime-playback-state";
 const BACKUP_VERSION = 3;
 
+/* ════════════════════════════════════════════════════════════════════════════
+   ☁️  CLOUD SYNC CONFIG  — PASTE YOUR FIREBASE PROJECT VALUES HERE
+   ────────────────────────────────────────────────────────────────────────────
+   Leave these empty to keep cloud sync OFF. The app works fully offline with or
+   without sync; nothing here is ever required for playback. When all three are
+   filled in, an optional "Sign in with Google" appears in Settings and your
+   library metadata (NOT audio) syncs to your own Firebase project.
+
+   Where each value comes from (see the setup steps reported after this build):
+     apiKey         → Firebase console → Project settings → "Web API Key"
+     projectId      → Firebase console → Project settings → "Project ID"
+     googleClientId → Google Cloud console → APIs & Services → Credentials →
+                      OAuth 2.0 Client ID (Web), ends with .apps.googleusercontent.com
+   ════════════════════════════════════════════════════════════════════════════ */
+const FIREBASE_CONFIG = {
+  apiKey: "",
+  projectId: "",
+  googleClientId: "",
+};
+const SYNC_LAST_UPDATED_KEY = "musime-sync-updatedAt";
+const SYNC_REFRESH_KEY = "musime-sync-refresh";
+const SYNC_UID_KEY = "musime-sync-uid";
+
 // Multiple JioSaavn API mirrors. We try each in order on failure.
 // All expose the same /search/songs?query=... endpoint shape.
 const SAAVN_MIRRORS = [
@@ -88,6 +111,13 @@ const nodes = {
   importBackupFile: $("import-backup-file"),
   exportLibrary: $("export-library"),
   importLibraryFile: $("import-library-file"),
+  cloudSyncSection: $("cloud-sync-section"),
+  cloudSyncStatus: $("cloud-sync-status"),
+  gsiButton: $("gsi-button"),
+  cloudSyncSignedIn: $("cloud-sync-signed-in"),
+  cloudSyncEmail: $("cloud-sync-email"),
+  syncNowBtn: $("sync-now-btn"),
+  signOutBtn: $("sign-out-btn"),
   miniPlayer: $("mini-player"),
   miniProgress: $("mini-progress"),
   miniContent: $("mini-content"),
@@ -266,6 +296,8 @@ function saveMeta() {
   localStorage.setItem(SONGS_KEY, JSON.stringify(songs));
   localStorage.setItem(PLAYLISTS_KEY, JSON.stringify(playlists));
   localStorage.setItem(PLAYLIST_ORDERS_KEY, JSON.stringify(playlistOrders));
+  // Opportunistic cloud write-back (no-op unless sync is configured + signed in).
+  try { schedulePush(); } catch {}
 }
 function loadMeta() {
   songs = JSON.parse(localStorage.getItem(SONGS_KEY) || "[]");
@@ -1380,28 +1412,33 @@ async function exportLibrary() {
   showToast(`Library exported (${songs.length} songs)`);
 }
 
-async function importLibrary(file) {
-  const payload = JSON.parse(await file.text());
-  if (!payload || payload.app !== "MusiMe" || !Array.isArray(payload.songs)) throw new Error("Invalid library file");
-
-  // MERGE records — keep any songs (and their audio) we already have.
+/* Merge library records (songs/playlists/orders) into the current state WITHOUT
+   wiping anything we already have or touching audio. Returns the count of new
+   songs added. Reused by both file import and cloud pull. */
+function mergeLibraryRecords(payload) {
+  if (!payload || !Array.isArray(payload.songs)) return 0;
   const existingIds = new Set(songs.map((s) => s.id));
   const norm = (s) => ({ ...s, playlists: Array.isArray(s.playlists) ? s.playlists : [], createdAt: s.createdAt || Date.now(), lastPlayedAt: s.lastPlayedAt || 0, playCount: s.playCount || 0, album: s.album || "", artwork: s.artwork || "", duration: s.duration || 0, saavnId: s.saavnId || "", query: s.query || "", srcUrl: s.srcUrl || "" });
   const incoming = payload.songs.filter((s) => s && s.id && !existingIds.has(s.id)).map(norm);
   songs = [...incoming, ...songs];
-
   // Merge playlists (union of names, keep "All songs" first).
   const plSet = new Set(playlists);
   (payload.playlists || []).forEach((p) => { if (p && !plSet.has(p)) { plSet.add(p); playlists.push(p); } });
   if (!playlists.includes("All songs")) playlists.unshift("All songs");
-
-  // Merge playlist orders (fill any the incoming file has that we don't).
+  // Merge playlist orders (fill any the incoming payload has that we don't).
   const po = payload.playlistOrders || {};
   Object.keys(po).forEach((pl) => { if (!playlistOrders[pl]) playlistOrders[pl] = po[pl]; });
   normalizePlaylistOrders();
   saveMeta();
   render();
-  showToast(`Imported ${incoming.length} records — fetching audio…`);
+  return incoming.length;
+}
+
+async function importLibrary(file) {
+  const payload = JSON.parse(await file.text());
+  if (!payload || payload.app !== "MusiMe" || !Array.isArray(payload.songs)) throw new Error("Invalid library file");
+  const added = mergeLibraryRecords(payload);
+  showToast(`Imported ${added} records — fetching audio…`);
   // Kick off audio re-download for anything we don't have a blob for.
   await restoreMissingAudio();
 }
@@ -1488,6 +1525,223 @@ async function restoreMissingAudio() {
   }
 }
 
+/* ══════════════ CLOUD SYNC (Firebase Firestore via REST + Google Identity) ══════════════
+   Optional, additive, and fully gated on FIREBASE_CONFIG being filled in. The app
+   NEVER blocks on sign-in or network: playback and all local features work
+   offline whether or not the user is signed in. Sync just runs opportunistically
+   when online and signed in.
+
+   No Firebase SDK — we use plain REST to keep the bundle tiny:
+   1. Google Identity Services (GSI) returns a Google ID token when the user taps
+      "Sign in with Google".
+   2. We exchange it for a Firebase ID token via Identity Toolkit REST
+      (accounts:signInWithIdp) and remember the refresh token.
+   3. We read/write a single per-user Firestore document users/{uid} that holds the
+      library metadata JSON as one string field, last-write-wins by updatedAt.
+   Security rules (provided in setup) lock users/{uid} to its owner. */
+const SYNC = {
+  enabled: !!(FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.projectId && FIREBASE_CONFIG.googleClientId),
+  uid: null, email: null, idToken: null, refreshToken: null, tokenExpAt: 0,
+  pushTimer: null, suppressPush: false, busy: false, gsiReady: false,
+};
+function syncLog(m) { dbg(`sync: ${m}`); }
+
+function localUpdatedAt() { return Number(localStorage.getItem(SYNC_LAST_UPDATED_KEY) || 0); }
+function setLocalUpdatedAt(ms) { try { localStorage.setItem(SYNC_LAST_UPDATED_KEY, String(ms)); } catch {} }
+
+function loadGsiScript() {
+  return new Promise((resolve) => {
+    if (window.google?.accounts?.id) return resolve(true);
+    const s = document.createElement("script");
+    s.src = "https://accounts.google.com/gsi/client";
+    s.async = true; s.defer = true;
+    s.onload = () => resolve(true);
+    s.onerror = () => { syncLog("GSI script failed to load (offline?)"); resolve(false); };
+    document.head.appendChild(s);
+  });
+}
+
+async function initCloudSync() {
+  if (!SYNC.enabled) {
+    if (nodes.cloudSyncSection) nodes.cloudSyncSection.classList.add("hidden");
+    return;
+  }
+  if (nodes.cloudSyncSection) nodes.cloudSyncSection.classList.remove("hidden");
+  setSyncStatus("Not signed in");
+  // Restore a previous session silently (refresh token persisted locally).
+  SYNC.refreshToken = localStorage.getItem(SYNC_REFRESH_KEY) || null;
+  SYNC.uid = localStorage.getItem(SYNC_UID_KEY) || null;
+  if (SYNC.refreshToken && SYNC.uid) {
+    setSyncStatus("Reconnecting…");
+    const ok = await refreshIdToken();
+    if (ok) { showSignedIn(); await pullAndMerge(); }
+    else setSyncStatus("Sign in to sync");
+  }
+  // Load Google sign-in button (only meaningful when online).
+  if (!navigator.onLine) { setSyncStatus("Offline — sync resumes when online"); }
+  const loaded = await loadGsiScript();
+  if (!loaded || !window.google?.accounts?.id) return;
+  try {
+    window.google.accounts.id.initialize({
+      client_id: FIREBASE_CONFIG.googleClientId,
+      callback: handleGoogleCredential,
+      auto_select: false,
+    });
+    if (nodes.gsiButton && !SYNC.uid) {
+      window.google.accounts.id.renderButton(nodes.gsiButton, { theme: "filled_black", size: "large", type: "standard", text: "signin_with" });
+    }
+    SYNC.gsiReady = true;
+  } catch (e) { syncLog(`GSI init error ${e?.message || e}`); }
+}
+
+function setSyncStatus(text) { if (nodes.cloudSyncStatus) nodes.cloudSyncStatus.textContent = text; }
+function showSignedIn() {
+  if (nodes.gsiButton) nodes.gsiButton.classList.add("hidden");
+  if (nodes.cloudSyncSignedIn) nodes.cloudSyncSignedIn.classList.remove("hidden");
+  if (nodes.cloudSyncEmail) nodes.cloudSyncEmail.textContent = SYNC.email || "Signed in";
+  setSyncStatus("Synced to your account");
+}
+function showSignedOut() {
+  if (nodes.cloudSyncSignedIn) nodes.cloudSyncSignedIn.classList.add("hidden");
+  if (nodes.gsiButton) {
+    nodes.gsiButton.classList.remove("hidden");
+    try { if (SYNC.gsiReady && !SYNC.uid) window.google.accounts.id.renderButton(nodes.gsiButton, { theme: "filled_black", size: "large", type: "standard", text: "signin_with" }); } catch {}
+  }
+  setSyncStatus("Not signed in");
+}
+
+// GSI callback: exchange the Google credential for a Firebase session.
+async function handleGoogleCredential(resp) {
+  try {
+    setSyncStatus("Signing in…");
+    const ok = await firebaseSignInWithGoogle(resp.credential);
+    if (!ok) { setSyncStatus("Sign-in failed"); return; }
+    showSignedIn();
+    await pullAndMerge();   // pull remote first (may add records + re-download)
+    schedulePush();         // then push any local-only additions
+  } catch (e) { syncLog(`credential error ${e?.message || e}`); setSyncStatus("Sign-in failed"); }
+}
+
+async function firebaseSignInWithGoogle(googleIdToken) {
+  try {
+    const r = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp?key=${FIREBASE_CONFIG.apiKey}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        postBody: `id_token=${googleIdToken}&providerId=google.com`,
+        requestUri: location.origin, returnSecureToken: true,
+      }),
+    });
+    if (!r.ok) { syncLog(`signInWithIdp ${r.status}`); return false; }
+    const d = await r.json();
+    SYNC.idToken = d.idToken; SYNC.refreshToken = d.refreshToken; SYNC.uid = d.localId;
+    SYNC.email = d.email || null;
+    SYNC.tokenExpAt = Date.now() + (Number(d.expiresIn || 3600) - 60) * 1000;
+    try { localStorage.setItem(SYNC_REFRESH_KEY, SYNC.refreshToken); localStorage.setItem(SYNC_UID_KEY, SYNC.uid); } catch {}
+    syncLog(`signed in uid=${SYNC.uid}`);
+    return true;
+  } catch (e) { syncLog(`signInWithIdp error ${e?.message || e}`); return false; }
+}
+
+async function refreshIdToken() {
+  if (!SYNC.refreshToken) return false;
+  try {
+    const r = await fetch(`https://securetoken.googleapis.com/v1/token?key=${FIREBASE_CONFIG.apiKey}`, {
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: `grant_type=refresh_token&refresh_token=${encodeURIComponent(SYNC.refreshToken)}`,
+    });
+    if (!r.ok) { syncLog(`token refresh ${r.status}`); if (r.status === 400) signOutCloud(); return false; }
+    const d = await r.json();
+    SYNC.idToken = d.id_token; SYNC.refreshToken = d.refresh_token || SYNC.refreshToken; SYNC.uid = d.user_id || SYNC.uid;
+    SYNC.tokenExpAt = Date.now() + (Number(d.expires_in || 3600) - 60) * 1000;
+    try { localStorage.setItem(SYNC_REFRESH_KEY, SYNC.refreshToken); localStorage.setItem(SYNC_UID_KEY, SYNC.uid); } catch {}
+    return true;
+  } catch (e) { syncLog(`token refresh error ${e?.message || e}`); return false; }
+}
+
+async function ensureToken() {
+  if (!SYNC.uid) return false;
+  if (SYNC.idToken && Date.now() < SYNC.tokenExpAt) return true;
+  return await refreshIdToken();
+}
+
+function docUrl() {
+  return `https://firestore.googleapis.com/v1/projects/${FIREBASE_CONFIG.projectId}/databases/(default)/documents/users/${SYNC.uid}`;
+}
+
+// Read the remote doc → { payload, updatedAt } or null if none / error.
+async function firestoreGet() {
+  if (!(await ensureToken())) return null;
+  try {
+    const r = await fetch(docUrl(), { headers: { Authorization: `Bearer ${SYNC.idToken}` } });
+    if (r.status === 404) return { payload: null, updatedAt: 0 };
+    if (!r.ok) { syncLog(`firestore get ${r.status}`); return null; }
+    const d = await r.json();
+    const f = d.fields || {};
+    const payloadStr = f.payload?.stringValue || "";
+    const updatedAt = Number(f.updatedAt?.integerValue || 0);
+    return { payload: payloadStr ? JSON.parse(payloadStr) : null, updatedAt };
+  } catch (e) { syncLog(`firestore get error ${e?.message || e}`); return null; }
+}
+
+// Write the local library to the remote doc with updatedAt = now.
+async function firestorePush() {
+  if (!(await ensureToken())) return false;
+  const updatedAt = Date.now();
+  const payloadStr = JSON.stringify({ app: "MusiMe", kind: "library", version: LIBRARY_VERSION, songs, playlists, playlistOrders });
+  const body = { fields: {
+    payload: { stringValue: payloadStr },
+    updatedAt: { integerValue: String(updatedAt) },
+    version: { integerValue: String(LIBRARY_VERSION) },
+  } };
+  try {
+    const r = await fetch(`${docUrl()}?updateMask.fieldPaths=payload&updateMask.fieldPaths=updatedAt&updateMask.fieldPaths=version`, {
+      method: "PATCH", headers: { Authorization: `Bearer ${SYNC.idToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) { syncLog(`firestore push ${r.status}`); return false; }
+    setLocalUpdatedAt(updatedAt);
+    syncLog(`pushed ${songs.length} songs`);
+    return true;
+  } catch (e) { syncLog(`firestore push error ${e?.message || e}`); return false; }
+}
+
+// Pull remote; if it's newer, merge its records and re-download any missing audio.
+async function pullAndMerge() {
+  if (!SYNC.uid || !navigator.onLine) return;
+  if (SYNC.busy) return; SYNC.busy = true;
+  try {
+    setSyncStatus("Syncing…");
+    const remote = await firestoreGet();
+    if (!remote) { setSyncStatus("Sync error"); return; }
+    if (remote.payload && remote.updatedAt >= localUpdatedAt()) {
+      SYNC.suppressPush = true;
+      const added = mergeLibraryRecords(remote.payload);
+      SYNC.suppressPush = false;
+      setLocalUpdatedAt(remote.updatedAt);
+      syncLog(`pulled (added ${added})`);
+      if (added > 0) { setSyncStatus(`Pulled ${added} new — fetching audio…`); restoreMissingAudio(); }
+    }
+    showSignedIn();
+  } finally { SYNC.busy = false; }
+}
+
+// Debounced write-back, called from saveMeta() on any local metadata change.
+function schedulePush() {
+  if (!SYNC.enabled || !SYNC.uid || SYNC.suppressPush) return;
+  if (!navigator.onLine) return;
+  setLocalUpdatedAt(Date.now());
+  if (SYNC.pushTimer) clearTimeout(SYNC.pushTimer);
+  SYNC.pushTimer = setTimeout(() => { SYNC.pushTimer = null; firestorePush(); }, 4000);
+}
+
+function signOutCloud() {
+  SYNC.uid = null; SYNC.email = null; SYNC.idToken = null; SYNC.refreshToken = null; SYNC.tokenExpAt = 0;
+  try { localStorage.removeItem(SYNC_REFRESH_KEY); localStorage.removeItem(SYNC_UID_KEY); } catch {}
+  try { window.google?.accounts?.id?.disableAutoSelect?.(); } catch {}
+  showSignedOut();
+  syncLog("signed out");
+}
+
 /* ══════════════ EVENT LISTENERS ══════════════ */
 nodes.searchForm.addEventListener("submit", async (e) => { e.preventDefault(); try { await searchRemoteSongs(nodes.searchQuery.value); } catch { remoteResults = []; renderRemoteResults(); showToast("Search failed"); } });
 nodes.urlForm.addEventListener("submit", async (e) => {
@@ -1505,6 +1759,10 @@ nodes.exportBackup.addEventListener("click", async () => { try { await exportBac
 nodes.importBackupFile.addEventListener("change", async (e) => { const f = e.target.files?.[0]; if (!f) return; try { await importBackup(f); showToast("Imported"); } catch { showToast("Import failed"); } finally { nodes.importBackupFile.value = ""; } });
 nodes.exportLibrary.addEventListener("click", async () => { try { await exportLibrary(); } catch { showToast("Export failed"); } });
 nodes.importLibraryFile.addEventListener("change", async (e) => { const f = e.target.files?.[0]; if (!f) return; try { await importLibrary(f); } catch { showToast("Import failed"); } finally { nodes.importLibraryFile.value = ""; } });
+if (nodes.syncNowBtn) nodes.syncNowBtn.addEventListener("click", async () => { if (!SYNC.uid) { showToast("Sign in first"); return; } showToast("Syncing…"); await pullAndMerge(); await firestorePush(); showToast("Sync complete"); });
+if (nodes.signOutBtn) nodes.signOutBtn.addEventListener("click", () => { signOutCloud(); showToast("Signed out"); });
+// Resume a debounced push if we come back online while signed in.
+window.addEventListener("online", () => { if (SYNC.enabled && SYNC.uid) { syncLog("online — syncing"); pullAndMerge(); } });
 
 /* ══════════════ SERVICE WORKER ══════════════ */
 if ("serviceWorker" in navigator) {
@@ -1620,6 +1878,9 @@ registerMediaHandlers();
   requestPersistence();
   // Migrate artwork for existing songs that were downloaded before this update
   migrateArtwork();
+  // Optional cloud sync — inert unless FIREBASE_CONFIG is filled in. Never blocks
+  // offline use; runs after everything local is ready.
+  initCloudSync();
 })();
 
 /* ══════════════ DIAGNOSTICS UI (removable) ══════════════ */
