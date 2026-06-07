@@ -30,6 +30,14 @@ let currentBlob = null; // In-memory copy of the playing song's Blob so we can
                         // IndexedDB read) inside a Media Session action handler,
                         // preserving iOS user-activation for resume.
 let mediaHandlersRegistered = false;
+// True when running as an installed PWA (iOS gives standalone apps a separate,
+// more aggressively-suspended WebKit audio session than a Safari tab).
+const IS_STANDALONE = window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+// Set whenever the app is backgrounded/hidden. In standalone mode iOS can
+// silently decouple the <audio> element from the audio output route during
+// suspension, so on the next resume we MUST re-prime the element even though it
+// still reports a healthy state. Cleared after a successful (re)play.
+let wasSuspended = false;
 let downloadQueue = [];
 let queueBusy = false;
 let remoteResults = [];
@@ -702,6 +710,7 @@ function getPlaylist() {
 async function playSong(song, startTime = 0) {
   const blob = await getBlob(song.id);
   if (!blob) { showToast("Song file not found"); dbg(`playSong: blob missing for ${song.id}`); return; }
+  wasSuspended = false; // a fresh source attach re-primes the audio route
   // Revoke the PREVIOUS url only — never the one we're about to use.
   if (currentObjectUrl) { try { URL.revokeObjectURL(currentObjectUrl); } catch {} }
   currentBlob = blob; // keep in memory for synchronous lock-screen resume
@@ -806,49 +815,67 @@ function readSavedTime() {
   return 0;
 }
 
-/* The bulletproof resume routine used by the lock-screen "play" action.
-   Strategy, in order, all keeping iOS activation alive where possible:
-   1. If the source is healthy, just play().
-   2. If the source is dead but we have the blob in memory, rebuild it
-      synchronously, restore position, then play() — NO await before play().
-   3. Only as a last resort fall back to the async IndexedDB reload. */
+/* The bulletproof resume routine used by the lock-screen "play" action and by
+   in-app play. Strategy, all keeping iOS user-activation alive:
+   1. Decide whether the element needs re-priming. It does when the source is
+      dead, OR — crucially for installed PWAs — when we're in standalone mode and
+      the app was suspended, because iOS silently decouples a "healthy"-looking
+      <audio> element from the audio route during standalone suspension. In that
+      case play() resolves but produces NO sound, so we must re-attach the source.
+   2. Re-prime SYNCHRONOUSLY from the in-memory blob, restore position, then
+      play() — no async work before play() so activation survives.
+   3. Fall back to the async IndexedDB reload only if the in-memory blob is gone.
+   4. Always reconcile the UI to the truth: only report "playing" if play()
+      actually succeeded; otherwise show paused so the UI never lies. */
 async function resumePlayback() {
   const a = nodes.audio;
-  dbg(`resumePlayback: ${audioStateStr()}`);
   const dead = !a.src || a.error !== null || a.readyState === 0; // HAVE_NOTHING
-  let savedTime = a.currentTime || 0;
+  const standaloneStale = IS_STANDALONE && wasSuspended; // route likely decoupled
+  dbg(`resumePlayback: standalone=${IS_STANDALONE} wasSuspended=${wasSuspended} dead=${dead} ${audioStateStr()}`);
 
-  if (dead) {
-    if (savedTime === 0) savedTime = readSavedTime();
-    const rebuilt = rebuildSourceSync();
-    if (rebuilt && savedTime > 0) {
-      a.addEventListener("loadedmetadata", () => { try { a.currentTime = savedTime; } catch {} }, { once: true });
-    }
-    if (!rebuilt) {
-      // No in-memory blob (e.g. fresh page reload that hasn't restored yet) —
-      // async reload. Activation may be lost, but it's the only option left.
+  let savedTime = a.currentTime || 0;
+  if (savedTime === 0) savedTime = readSavedTime();
+
+  if (dead || standaloneStale) {
+    const rebuilt = rebuildSourceSync(); // synchronous — re-attaches audio route
+    if (rebuilt) {
+      if (savedTime > 0) {
+        a.addEventListener("loadedmetadata", () => { try { a.currentTime = savedTime; } catch {} }, { once: true });
+      }
+      // Re-establish lock-screen metadata/handlers for the re-attached element
+      // (standalone iOS can drop these across a suspension).
       if (currentSongId) {
         const s = songs.find((x) => x.id === currentSongId);
-        if (s) { dbg("resumePlayback: async DB reload"); await playSong(s, savedTime || readSavedTime()); return; }
+        if (s) { try { updateMediaSession(s, getArtUrl(s)); } catch {} }
       }
+    } else if (currentSongId) {
+      // No in-memory blob (e.g. fresh page reload that hasn't restored yet) —
+      // async reload from IndexedDB as a last resort.
+      const s = songs.find((x) => x.id === currentSongId);
+      if (s) { dbg("resumePlayback: async DB reload"); await playSong(s, savedTime); wasSuspended = false; return; }
       dbg("resumePlayback: nothing to resume");
       return;
     }
   }
 
-  // Call play() with NO await before it in the rebuilt path (activation intact).
-  const p = a.play();
-  if (p && typeof p.then === "function") {
-    p.then(() => { setPlayingState(true); dbg(`resume play ok: ${audioStateStr()}`); })
-     .catch(async (e) => {
-       dbg(`resume play() rejected: ${e?.message || e} — async fallback`);
-       if (currentSongId) {
-         const s = songs.find((x) => x.id === currentSongId);
-         if (s) { try { await playSong(s, savedTime || readSavedTime()); } catch (e2) { dbg(`fallback failed: ${e2?.message || e2}`); } }
-       }
-     });
-  } else {
+  // play() is INVOKED synchronously here (nothing async ran before it), so the
+  // media-key user-activation is still valid even though we await the result.
+  try {
+    await a.play();
+    wasSuspended = false;
     setPlayingState(true);
+    dbg(`resume play ok: ${audioStateStr()}`);
+  } catch (e) {
+    dbg(`resume play() rejected: ${e?.message || e} — async fallback`);
+    if (currentSongId) {
+      const s = songs.find((x) => x.id === currentSongId);
+      if (s) {
+        try { await playSong(s, savedTime); wasSuspended = false; return; }
+        catch (e2) { dbg(`fallback failed: ${e2?.message || e2}`); }
+      }
+    }
+    // Could not start audio — keep the UI honest rather than claiming "playing".
+    setPlayingState(false);
   }
 }
 
@@ -975,24 +1002,46 @@ nodes.audio.addEventListener("timeupdate", () => {
   schedulePlaybackSave();
 });
 
-// Save state when page is hidden/closed (handles iOS suspend & app close)
+// Save state when page is hidden/closed (handles iOS suspend & app close).
+// Mark wasSuspended so the next resume re-primes the (possibly route-decoupled)
+// audio element in standalone mode.
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") {
+    wasSuspended = true;
     savePlaybackState();
     dbg(`hidden: ${audioStateStr()}`);
   } else {
-    // Returned to foreground — iOS may have dropped the session. Re-assert
-    // metadata + handlers + playbackState so lock-screen controls keep working.
-    dbg(`visible: ${audioStateStr()}`);
-    if (currentSongId) {
-      const s = songs.find((x) => x.id === currentSongId);
-      if (s) { try { updateMediaSession(s, getArtUrl(s)); } catch {} }
-      setPlayingState(!nodes.audio.paused);
-    }
+    dbg(`visible: standalone=${IS_STANDALONE} ${audioStateStr()}`);
+    reconcileOnVisible();
   }
 });
-window.addEventListener("pagehide", savePlaybackState);
+window.addEventListener("pagehide", () => { wasSuspended = true; savePlaybackState(); });
 window.addEventListener("beforeunload", savePlaybackState);
+
+/* On returning to the foreground, re-assert the media session and reconcile the
+   UI to what the audio element is ACTUALLY doing. In standalone mode the element
+   can come back "playing" but silent (route decoupled) — detect that by checking
+   whether playback is really advancing, and if not, re-prime it. */
+async function reconcileOnVisible() {
+  if (!currentSongId) return;
+  const a = nodes.audio;
+  const s = songs.find((x) => x.id === currentSongId);
+  if (s) { try { updateMediaSession(s, getArtUrl(s)); } catch {} }
+
+  if (isPlaying && IS_STANDALONE) {
+    // We think we're playing — verify real audio progress over a short window.
+    const t0 = a.currentTime;
+    await new Promise((r) => setTimeout(r, 450));
+    const advanced = !a.paused && Math.abs(a.currentTime - t0) > 0.01;
+    if (!advanced) {
+      dbg(`visible: playback stuck/silent (t0=${t0.toFixed(2)} t1=${a.currentTime.toFixed(2)} paused=${a.paused}) — re-priming`);
+      resumePlayback(); // re-attach route + play; reconciles UI to the result
+      return;
+    }
+  }
+  // Otherwise just make the UI match reality.
+  setPlayingState(!a.paused);
+}
 nodes.audio.addEventListener("loadedmetadata", () => {
   if (currentSongId && nodes.audio.duration) {
     const ref = songs.find((s) => s.id === currentSongId);
