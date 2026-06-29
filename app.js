@@ -1070,14 +1070,9 @@ function registerMediaHandlers() {
       updatePositionState(true); // immediate, bypass throttle
     }
   });
-  set("seekbackward", (details) => {
-    const skip = (details && details.seekOffset) || 10;
-    try { nodes.audio.currentTime = Math.max(0, nodes.audio.currentTime - skip); } catch {}
-  });
-  set("seekforward", (details) => {
-    const skip = (details && details.seekOffset) || 10;
-    try { nodes.audio.currentTime = Math.min(nodes.audio.duration || 0, nodes.audio.currentTime + skip); } catch {}
-  });
+  // No seekbackward/seekforward handlers on purpose — registering them makes iOS
+  // show ±skip (forward/backward) buttons on the lock screen. Leaving them off
+  // makes iOS show the previous/next-track buttons (handled above) instead.
   set("stop", () => { dbg("ACTION stop"); try { nodes.audio.pause(); } catch {} setPlayingState(false); savePlaybackState(); });
 
   mediaHandlersRegistered = true;
