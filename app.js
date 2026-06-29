@@ -803,6 +803,7 @@ let mediaMetaSongId = null;
 function updateMediaSession(song, localArt, force = false) {
   if (!("mediaSession" in navigator)) return;
   registerMediaHandlers(); // idempotent — guarantees handlers exist
+  enforceTrackControls();  // every update: keep prev/next, never the ±10s skip buttons
   if (!force && song && song.id === mediaMetaSongId) {
     // Same song already shown — don't touch metadata (no flicker), just position.
     updatePositionState();
@@ -1062,21 +1063,35 @@ function registerMediaHandlers() {
     setPlayingState(false);
     savePlaybackState();
   });
-  set("previoustrack", () => { dbg("ACTION previoustrack"); playNext(-1); });
-  set("nexttrack", () => { dbg("ACTION nexttrack"); playNext(1); });
   set("seekto", (details) => {
     if (details && details.seekTime != null) {
       try { nodes.audio.currentTime = details.seekTime; } catch {}
-      updatePositionState(true); // immediate, bypass throttle
+      updatePositionState(true); // immediate, bypass throttle (keeps scrubber draggable)
     }
   });
-  // No seekbackward/seekforward handlers on purpose — registering them makes iOS
-  // show ±skip (forward/backward) buttons on the lock screen. Leaving them off
-  // makes iOS show the previous/next-track buttons (handled above) instead.
   set("stop", () => { dbg("ACTION stop"); try { nodes.audio.pause(); } catch {} setPlayingState(false); savePlaybackState(); });
 
+  enforceTrackControls(); // previous/next track + explicitly clear seek buttons
   mediaHandlersRegistered = true;
   dbg("media handlers registered");
+}
+
+/* Force PREVIOUS/NEXT TRACK on the lock screen and never the ±10s skip buttons.
+   iOS draws the skip buttons whenever seekbackward/seekforward handlers exist,
+   and once set they linger until EXPLICITLY nulled — simply not registering them
+   isn't enough if they were ever set in this session. So we (re)assert prev/next
+   AND null the seek handlers here, and call this on every registration and every
+   metadata update (incl. visibilitychange/resume) so they can never persist.
+   seekto is intentionally left in place — it's the draggable progress bar and
+   does NOT create the skip buttons. */
+function enforceTrackControls() {
+  if (!("mediaSession" in navigator)) return;
+  const ms = navigator.mediaSession;
+  const set = (a, fn) => { try { ms.setActionHandler(a, fn); } catch {} };
+  set("previoustrack", () => { dbg("ACTION previoustrack"); playNext(-1); });
+  set("nexttrack", () => { dbg("ACTION nexttrack"); playNext(1); });
+  set("seekbackward", null);
+  set("seekforward", null);
 }
 
 /* Single source of truth for the lock-screen scrubber. ALWAYS reads the MAIN song
