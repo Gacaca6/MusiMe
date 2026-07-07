@@ -698,6 +698,8 @@ select {
 
 .hidden { display: none !important; }
 
+.splash-credit { margin-top: 0.5rem; font-size: 0.78rem; letter-spacing: 0.14em; color: var(--accent); font-weight: 600; }
+
 /* ═══════════════ LYRICS (Spotify-style card, scroll down to see) ═══════════════ */
 .lyrics-card {
   width: 100%;

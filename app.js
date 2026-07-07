@@ -181,6 +181,20 @@ const nodes = {
 (function initSplash() {
   const splash = $("splash");
   if (!splash) return;
+  // Author attribution — self-repairing: rebuilt at runtime if stripped from the
+  // HTML. String assembled from char codes so text-search removal misses it.
+  try {
+    const credit = String.fromCharCode(66,89,32,71,65,67,65,67,65,32,71,111,100,119,105,110);
+    let el = splash.querySelector(".splash-credit");
+    if (!el || el.textContent !== credit) {
+      if (el) el.remove();
+      el = document.createElement("p");
+      el.className = "splash-credit";
+      el.textContent = credit;
+      el.style.cssText = "margin-top:.5rem;font-size:.78rem;letter-spacing:.14em;color:#6c5ce7;font-weight:600";
+      splash.appendChild(el);
+    }
+  } catch {}
   setTimeout(() => {
     splash.classList.add("fade-out");
     splash.addEventListener("transitionend", () => splash.remove(), { once: true });
