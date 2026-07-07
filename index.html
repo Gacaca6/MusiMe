@@ -73,6 +73,11 @@
             <option value="playlist">Playlist</option>
           </select>
         </div>
+        <!-- Shows which playlist the library is filtered to -->
+        <div id="active-playlist-chip" class="playlist-chip hidden">
+          <span id="active-playlist-name"></span>
+          <button id="clear-playlist-filter" type="button" aria-label="Show all songs">&#10005;</button>
+        </div>
         <!-- Recently Played Section -->
         <div id="recently-played-section" class="recently-played-section hidden">
           <h3 class="section-label">Recently Played</h3>
@@ -300,6 +305,20 @@
         <span>More</span>
       </button>
     </nav>
+
+    <!-- Add-to-playlist bottom sheet (prompt() is ignored in iOS standalone PWAs) -->
+    <div id="playlist-sheet" class="sheet-backdrop hidden">
+      <div class="sheet" role="dialog" aria-label="Add to playlist">
+        <h3 class="sheet-title">Add to playlist</h3>
+        <p id="sheet-song-title" class="hint sheet-song"></p>
+        <div id="sheet-playlists" class="sheet-list"></div>
+        <form id="sheet-new-form" class="sheet-new" action="javascript:void(0)">
+          <input id="sheet-new-name" type="text" placeholder="New playlist name..." />
+          <button class="pill-btn accent" type="submit">Create</button>
+        </form>
+        <button id="sheet-close" class="pill-btn wide" type="button">Done</button>
+      </div>
+    </div>
 
     <audio id="audio" preload="metadata"></audio>
     <aside id="toast" class="toast" role="status" aria-live="polite"></aside>

@@ -115,6 +115,15 @@ const nodes = {
   playlistActiveLabel: $("playlist-active-label"),
   searchInput: $("search-input"),
   sortSelect: $("sort-select"),
+  playlistSheet: $("playlist-sheet"),
+  sheetSongTitle: $("sheet-song-title"),
+  sheetPlaylists: $("sheet-playlists"),
+  sheetNewForm: $("sheet-new-form"),
+  sheetNewName: $("sheet-new-name"),
+  sheetClose: $("sheet-close"),
+  playlistChip: $("active-playlist-chip"),
+  playlistChipName: $("active-playlist-name"),
+  clearPlaylistFilter: $("clear-playlist-filter"),
   recentSection: $("recently-played-section"),
   recentlyPlayed: $("recently-played"),
   exportBackup: $("export-backup"),
@@ -180,17 +189,17 @@ const nodes = {
 })();
 
 /* ══════════════ TAB NAV ══════════════ */
+function switchTab(viewId) {
+  document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.view === viewId));
+  document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
+  const view = $(viewId);
+  if (view) {
+    view.classList.add("active");
+    view.scrollTop = 0;
+  }
+}
 document.querySelectorAll(".tab").forEach((tab) => {
-  tab.addEventListener("click", () => {
-    document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
-    document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
-    tab.classList.add("active");
-    const view = $(tab.dataset.view);
-    if (view) {
-      view.classList.add("active");
-      view.scrollTop = 0;
-    }
-  });
+  tab.addEventListener("click", () => switchTab(tab.dataset.view));
 });
 
 /* ══════════════ INSTALL ══════════════ */
@@ -684,6 +693,7 @@ function renderQueue() {
   });
 }
 function enqueueDownload(result) {
+  try { stopPreview(); } catch {}
   if (downloadQueue.some((j) => j.id === result.id && ["queued", "downloading"].includes(j.state))) { showToast("Already in queue"); return; }
   downloadQueue.push({ id: result.id, title: result.title, state: "queued", progress: 0, result });
   renderQueue();
@@ -730,10 +740,24 @@ async function processQueue() {
     }
   } finally { queueBusy = false; }
 }
+// Infer a correct audio MIME from the URL when the CDN header is missing or
+// generic. JioSaavn 320k files are AAC in .mp4 containers — storing them typed
+// as audio/mpeg can make some Safari versions mis-decode (silent playback).
+function inferAudioMime(url, headerCt) {
+  const ct = (headerCt || "").toLowerCase();
+  if (ct && ct.startsWith("audio/") && ct !== "audio/*") return headerCt;
+  const path = (url || "").split("?")[0].toLowerCase();
+  if (path.endsWith(".mp4") || path.endsWith(".m4a")) return "audio/mp4";
+  if (path.endsWith(".aac")) return "audio/aac";
+  if (path.endsWith(".ogg") || path.endsWith(".opus")) return "audio/ogg";
+  if (path.endsWith(".wav")) return "audio/wav";
+  return "audio/mpeg";
+}
+
 async function fetchAudioBlob(url, onProgress) {
   const res = await fetch(url);
   if (!res.ok) throw new Error("Download failed");
-  const ct = res.headers.get("content-type") || "";
+  const ct = inferAudioMime(url, res.headers.get("content-type"));
   const reader = res.body?.getReader?.();
   if (!reader) { onProgress(100); return await res.blob(); }
   const total = Number(res.headers.get("content-length") || 0);
@@ -745,8 +769,56 @@ async function fetchAudioBlob(url, onProgress) {
     onProgress(total > 0 ? Math.max(10, Math.min(98, Math.round((loaded / total) * 100))) : Math.min(98, 10 + chunks.length * 3));
   }
   onProgress(100);
-  return new Blob(chunks, { type: ct || "audio/mpeg" });
+  return new Blob(chunks, { type: ct });
 }
+
+/* ══════════════ SEARCH PREVIEW ══════════════
+   Tap a search result row to hear a short preview (max 30s) before downloading.
+   Uses its OWN audio element so the main player, Media Session, and all
+   lock-screen machinery are never touched. Online + foreground only: the
+   preview stops when the app is hidden, when a library song plays, when a
+   download starts, or when another preview starts. */
+let previewAudio = null;
+let previewingId = null;
+const PREVIEW_MAX_SECONDS = 30;
+function stopPreview() {
+  if (!previewAudio) return;
+  try { previewAudio.pause(); } catch {}
+  try { previewAudio.removeAttribute("src"); previewAudio.load(); } catch {}
+  if (previewingId) {
+    previewingId = null;
+    document.querySelectorAll(".result-item.previewing").forEach((el) => el.classList.remove("previewing"));
+  }
+}
+function togglePreview(result, rowEl) {
+  if (previewingId === result.id) { stopPreview(); return; }
+  stopPreview();
+  if (!navigator.onLine) { showToast("Previews need internet"); return; }
+  if (!previewAudio) {
+    previewAudio = document.createElement("audio");
+    previewAudio.preload = "none";
+    previewAudio.setAttribute("playsinline", "");
+    previewAudio.addEventListener("timeupdate", () => {
+      if (previewAudio.currentTime >= PREVIEW_MAX_SECONDS) stopPreview();
+    });
+    previewAudio.addEventListener("ended", stopPreview);
+    previewAudio.addEventListener("error", () => { if (previewingId) { stopPreview(); showToast("Preview unavailable"); } });
+    previewAudio.style.display = "none";
+    document.body.appendChild(previewAudio); // in-DOM: more reliable on older WebKit
+  }
+  // Pause the main player so two songs never overlap (normal pause path — safe)
+  if (!nodes.audio.paused) { try { nodes.audio.pause(); } catch {} }
+  previewingId = result.id;
+  rowEl.classList.add("previewing");
+  previewAudio.src = result.url;
+  const p = previewAudio.play();
+  if (p && p.catch) p.catch((e) => { dbg(`preview rejected: ${e?.message || e}`); stopPreview(); showToast("Preview unavailable"); });
+  showToast("Previewing — tap again to stop");
+}
+// Never let a preview keep playing into the background / locked screen
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") { try { stopPreview(); } catch {} }
+});
 
 /* ══════════════ RENDER SEARCH RESULTS ══════════════ */
 function renderRemoteResults() {
@@ -767,6 +839,8 @@ function renderRemoteResults() {
     const btn = document.createElement("button"); btn.className = "add-btn"; btn.innerHTML = "+";
     btn.addEventListener("click", (e) => { e.stopPropagation(); enqueueDownload(result); });
     row.querySelector(".result-actions").append(btn);
+    // Tap the row to preview the song before downloading (tap again to stop)
+    row.addEventListener("click", () => togglePreview(result, row));
     nodes.searchResults.append(row);
   });
   // "Load more" pagination — only when the last page came back full
@@ -821,18 +895,46 @@ function renderRecent() {
   });
 }
 
+function playPlaylist(pl) {
+  selectedPlaylist = pl;
+  render();
+  const list = sortSongs(filterSongs());
+  if (!list.length) { showToast("Playlist is empty — add songs from Library with +"); return; }
+  playSong(list[0]);
+}
+function openPlaylist(pl) {
+  selectedPlaylist = pl;
+  render();
+  switchTab("view-library");
+}
 function renderPlaylists() {
   nodes.playlists.innerHTML = "";
   playlists.forEach((pl) => {
-    const card = document.createElement("button"); card.type = "button";
+    // div (not button): the card contains its own action buttons
+    const card = document.createElement("div");
     card.className = `playlist-card${pl === selectedPlaylist ? " active" : ""}`;
     const cnt = pl === "All songs" ? songs.length : songs.filter((s) => s.playlists.includes(pl)).length;
-    card.innerHTML = `<p class="name">${pl}</p><p class="count">${cnt} song${cnt !== 1 ? "s" : ""}</p>`;
+    card.innerHTML = `<p class="name">${pl}</p><p class="count">${cnt} song${cnt !== 1 ? "s" : ""}</p>
+      <div class="playlist-card-actions">
+        <button type="button" class="mini-act play">&#9654; Play</button>
+        <button type="button" class="mini-act open">Open</button>
+      </div>`;
+    card.querySelector(".mini-act.play").addEventListener("click", (e) => { e.stopPropagation(); playPlaylist(pl); });
+    card.querySelector(".mini-act.open").addEventListener("click", (e) => { e.stopPropagation(); openPlaylist(pl); });
     card.addEventListener("click", () => { selectedPlaylist = pl; render(); });
     nodes.playlists.append(card);
   });
   if (selectedPlaylist !== "All songs") { nodes.playlistAdmin.classList.remove("hidden"); nodes.playlistActiveLabel.textContent = `Managing: ${selectedPlaylist}`; nodes.renamePlaylist.value = selectedPlaylist; }
   else { nodes.playlistAdmin.classList.add("hidden"); nodes.renamePlaylist.value = ""; }
+  // Library chip: show which playlist the library is filtered to
+  if (nodes.playlistChip) {
+    if (selectedPlaylist !== "All songs") {
+      nodes.playlistChipName.textContent = `Playlist: ${selectedPlaylist}`;
+      nodes.playlistChip.classList.remove("hidden");
+    } else {
+      nodes.playlistChip.classList.add("hidden");
+    }
+  }
 }
 
 /* ══════════════ RENDER SONGS ══════════════ */
@@ -1013,6 +1115,7 @@ function getPlaylist() {
 }
 
 async function playSong(song, startTime = 0) {
+  try { stopPreview(); } catch {} // library playback always wins over a preview
   const blob = await getBlob(song.id);
   if (!blob) { showToast("Song file not found"); dbg(`playSong: blob missing for ${song.id}`); return; }
   wasSuspended = false; // a fresh source attach re-primes the audio route
@@ -1059,6 +1162,8 @@ async function playSong(song, startTime = 0) {
   // Lyrics: load from cache (or fetch if panel open + online) — never blocks playback
   loadLyricsForCurrent(song).catch(() => {});
 
+  watchdogRetriedFor = null; // fresh song start gets a fresh auto-heal chance
+  resetAudioOutput();
   try { await nodes.audio.play(); setPlayingState(true); dbg(`play ok: ${audioStateStr()}`); }
   catch (e) { dbg(`playSong play() rejected: ${e?.message || e}`); showToast("Tap play to start"); }
 }
@@ -1197,6 +1302,49 @@ function ensureKeepAlive() {
   }
 }
 
+/* Reset output properties that can silently get stuck on some devices/webviews
+   (muted flag, zero volume, zero playbackRate => "shows playing but no sound").
+   Every write is guarded — iOS treats volume as read-only, which is fine. */
+function resetAudioOutput() {
+  const a = nodes.audio;
+  try { if (a.muted) { a.muted = false; dbg("output: unmuted stuck element"); } } catch {}
+  try { if (a.volume < 1) { a.volume = 1; dbg("output: restored volume"); } } catch {}
+  try { if (!a.playbackRate || a.playbackRate < 0.5) { a.playbackRate = 1; dbg("output: restored playbackRate"); } } catch {}
+}
+
+/* PLAYBACK WATCHDOG — the "shows playing but no sound" killer.
+   After playback (re)starts, verify currentTime actually advances within ~1.6s.
+   If the element claims to be playing but time is frozen, the decode/output
+   pipeline is dead (seen on some phones after suspensions): rebuild the source
+   from the in-memory blob at the same position and play again — once per song
+   start, FOREGROUND ONLY (a load() while locked is deferred by iOS, which is the
+   silent-until-unlock trap; the locked path is protected by the keep-alive). */
+let watchdogTimer = null;
+let watchdogRetriedFor = null;
+function armPlaybackWatchdog() {
+  if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
+  const a = nodes.audio;
+  const t0 = a.currentTime;
+  const songAtArm = currentSongId;
+  watchdogTimer = setTimeout(() => {
+    watchdogTimer = null;
+    if (currentSongId !== songAtArm) return;         // song changed
+    if (a.paused || a.ended) return;                  // legitimately not playing
+    if (Math.abs(a.currentTime - t0) > 0.05) return;  // rendering fine
+    if (document.visibilityState === "hidden") { dbg("watchdog: frozen but hidden — leaving to locked-path handling"); return; }
+    if (watchdogRetriedFor === songAtArm) { dbg("watchdog: still frozen after rebuild — giving up on auto-heal"); return; }
+    watchdogRetriedFor = songAtArm;
+    dbg(`watchdog: playing-but-frozen at t=${t0.toFixed(2)} — rebuilding source (${audioStateStr()})`);
+    const saved = a.currentTime || readSavedTime();
+    resetAudioOutput();
+    if (rebuildSourceSync()) {
+      if (saved > 0) a.addEventListener("loadedmetadata", () => { try { a.currentTime = saved; } catch {} }, { once: true });
+      const p = a.play();
+      if (p && p.catch) p.catch((e) => dbg(`watchdog replay rejected: ${e?.message || e}`));
+    }
+  }, 1600);
+}
+
 /* One-shot probe that logs whether/when the MAIN element's currentTime actually
    advances after a resume, and whether the screen was still locked at that
    instant — this is how we confirm audio truly renders while locked vs. only on
@@ -1276,6 +1424,7 @@ async function resumePlayback(forceReprime = false) {
 
   armRenderProbe(); // confirm (via the log) whether audio truly renders while locked
 
+  resetAudioOutput();
   // play() is INVOKED synchronously here, so the media-key user-activation holds.
   try {
     await a.play();
@@ -1443,7 +1592,7 @@ function playNext(direction = 1) {
 
 // Audio events
 nodes.audio.addEventListener("play", () => { setPlayingState(true); });
-nodes.audio.addEventListener("playing", () => { setPlayingState(true); updatePositionState(true); });
+nodes.audio.addEventListener("playing", () => { setPlayingState(true); updatePositionState(true); armPlaybackWatchdog(); });
 nodes.audio.addEventListener("pause", () => { setPlayingState(false); savePlaybackState(); });
 nodes.audio.addEventListener("ended", () => {
   if (repeatMode === "one") { nodes.audio.currentTime = 0; nodes.audio.play(); return; }
@@ -1595,15 +1744,67 @@ function updateSleepDisplay() {
 
 /* ══════════════ SONG OPS ══════════════ */
 function toggleFavorite(id) { const s = songs.find((s) => s.id === id); if (!s) return; s.favorite = !s.favorite; saveMeta(); renderSongs(); }
+/* Add-to-playlist bottom sheet. The old flow used window.prompt(), which iOS
+   silently ignores in installed (standalone) PWAs — this is why playlists never
+   worked on iPhones. Tap rows to toggle membership; create new inline. */
+let sheetSongId = null;
 function addSongToPlaylist(id) {
-  const avail = playlists.filter((p) => p !== "All songs");
-  if (!avail.length) { showToast("Create a playlist first"); return; }
-  const pick = prompt(`Add to:\n${avail.join("\n")}`);
-  if (!pick || !avail.includes(pick)) { showToast("Playlist not found"); return; }
-  const s = songs.find((s) => s.id === id); if (!s) return;
-  if (!s.playlists.includes(pick)) { s.playlists.push(pick); playlistOrders[pick] = [...(playlistOrders[pick] || []), s.id]; }
-  saveMeta(); renderSongs(); showToast(`Added to ${pick}`);
+  const s = songs.find((x) => x.id === id);
+  if (!s) return;
+  sheetSongId = id;
+  nodes.sheetSongTitle.textContent = `${s.title} — ${s.artist || "Unknown"}`;
+  renderSheetRows();
+  nodes.playlistSheet.classList.remove("hidden");
 }
+function renderSheetRows() {
+  const s = songs.find((x) => x.id === sheetSongId);
+  if (!s) return;
+  nodes.sheetPlaylists.innerHTML = "";
+  const avail = playlists.filter((p) => p !== "All songs");
+  if (!avail.length) {
+    nodes.sheetPlaylists.innerHTML = `<p class="hint" style="padding:0.4rem 0.2rem">No playlists yet — create one below.</p>`;
+    return;
+  }
+  avail.forEach((pl) => {
+    const inPl = s.playlists.includes(pl);
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = `sheet-row${inPl ? " in-playlist" : ""}`;
+    const cnt = songs.filter((x) => x.playlists.includes(pl)).length;
+    row.innerHTML = `<span>${pl} <span class="hint">(${cnt})</span></span><span class="check">${inPl ? "&#10003;" : "+"}</span>`;
+    row.addEventListener("click", () => {
+      if (s.playlists.includes(pl)) {
+        s.playlists = s.playlists.filter((p) => p !== pl);
+        playlistOrders[pl] = (playlistOrders[pl] || []).filter((sid) => sid !== s.id);
+        showToast(`Removed from ${pl}`);
+      } else {
+        s.playlists.push(pl);
+        playlistOrders[pl] = [...(playlistOrders[pl] || []), s.id];
+        showToast(`Added to ${pl}`);
+      }
+      saveMeta(); renderSheetRows(); render();
+    });
+    nodes.sheetPlaylists.append(row);
+  });
+}
+function closePlaylistSheet() {
+  nodes.playlistSheet.classList.add("hidden");
+  sheetSongId = null;
+}
+nodes.sheetClose.addEventListener("click", closePlaylistSheet);
+nodes.playlistSheet.addEventListener("click", (e) => { if (e.target === nodes.playlistSheet) closePlaylistSheet(); });
+nodes.sheetNewForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const n = nodes.sheetNewName.value.replace(/\s+/g, " ").trim();
+  if (!n) return;
+  if (playlists.some((p) => slugify(p) === slugify(n))) { showToast("Playlist already exists"); return; }
+  playlists.push(n); playlistOrders[n] = [];
+  const s = songs.find((x) => x.id === sheetSongId);
+  if (s && !s.playlists.includes(n)) { s.playlists.push(n); playlistOrders[n].push(s.id); }
+  nodes.sheetNewName.value = "";
+  saveMeta(); renderSheetRows(); render();
+  showToast(`Created "${n}" and added song`);
+});
 async function removeSong(id) {
   songs = songs.filter((s) => s.id !== id);
   Object.keys(playlistOrders).forEach((pl) => { playlistOrders[pl] = (playlistOrders[pl] || []).filter((sid) => sid !== id); });
@@ -2048,6 +2249,7 @@ nodes.playlistForm.addEventListener("submit", (e) => { e.preventDefault(); const
 nodes.favoritesToggle.addEventListener("click", () => { favoritesOnly = !favoritesOnly; nodes.favoritesToggle.classList.toggle("active-fav", favoritesOnly); nodes.favoritesToggle.querySelector(".fav-icon").innerHTML = favoritesOnly ? "&#9829;" : "&#9825;"; renderSongs(); });
 nodes.renamePlaylistBtn.addEventListener("click", doRenamePlaylist);
 nodes.deletePlaylistBtn.addEventListener("click", deleteSelectedPlaylist);
+if (nodes.clearPlaylistFilter) nodes.clearPlaylistFilter.addEventListener("click", () => { selectedPlaylist = "All songs"; render(); });
 nodes.searchInput.addEventListener("input", () => { searchQuery = nodes.searchInput.value.trim(); renderSongs(); });
 nodes.sortSelect.addEventListener("change", () => { sortMode = nodes.sortSelect.value; renderSongs(); });
 nodes.exportBackup.addEventListener("click", async () => { try { await exportBackup(); } catch { showToast("Export failed"); } });

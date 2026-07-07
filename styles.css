@@ -745,6 +745,62 @@ select {
 /* ═══════════════ LOAD MORE ═══════════════ */
 .load-more-btn { display: block; margin: 0.9rem auto 0.4rem; max-width: 240px; }
 
+/* ═══════════════ ADD-TO-PLAYLIST SHEET ═══════════════ */
+.sheet-backdrop {
+  position: fixed; inset: 0; z-index: 300;
+  background: rgba(0,0,0,0.6);
+  display: flex; align-items: flex-end; justify-content: center;
+}
+.sheet {
+  width: 100%; max-width: 500px;
+  background: #14141c;
+  border-radius: 20px 20px 0 0;
+  padding: 1.1rem 1.2rem calc(1.1rem + env(safe-area-inset-bottom));
+  max-height: 70vh; display: flex; flex-direction: column;
+  animation: slideUp 220ms ease-out;
+}
+.sheet-title { font-size: 1.05rem; margin: 0 0 0.15rem; }
+.sheet-song { margin: 0 0 0.8rem; }
+.sheet-list { overflow-y: auto; -webkit-overflow-scrolling: touch; margin-bottom: 0.8rem; }
+.sheet-row {
+  display: flex; align-items: center; justify-content: space-between;
+  width: 100%; padding: 0.75rem 0.9rem; margin-bottom: 0.4rem;
+  background: var(--surface); border: 1px solid transparent;
+  border-radius: var(--radius); color: var(--text); font-size: 0.95rem;
+  cursor: pointer;
+}
+.sheet-row.in-playlist { border-color: var(--accent); background: rgba(108,92,231,0.14); }
+.sheet-row .check { color: var(--accent); font-weight: 700; }
+.sheet-new { display: flex; gap: 0.5rem; margin-bottom: 0.8rem; }
+.sheet-new input {
+  flex: 1; padding: 0.65rem 0.9rem; border-radius: var(--radius);
+  border: 1px solid var(--surface-3); background: var(--surface); color: var(--text);
+  font-size: 0.9rem;
+}
+
+/* ═══════════════ PLAYLIST CARDS + CHIP ═══════════════ */
+.playlist-card-actions { display: flex; gap: 0.45rem; margin-top: 0.55rem; }
+.playlist-card-actions .mini-act {
+  flex: 1; padding: 0.4rem 0.5rem; font-size: 0.78rem;
+  border-radius: 10px; border: 1px solid var(--surface-3);
+  background: var(--surface-2); color: var(--text); cursor: pointer;
+}
+.playlist-card-actions .mini-act.play { background: var(--accent); border-color: var(--accent); color: #fff; }
+.playlist-chip {
+  display: inline-flex; align-items: center; gap: 0.5rem;
+  margin: 0.55rem 0 0.15rem; padding: 0.35rem 0.5rem 0.35rem 0.8rem;
+  background: rgba(108,92,231,0.16); border: 1px solid var(--accent);
+  border-radius: 999px; font-size: 0.8rem; color: var(--text);
+}
+.playlist-chip button {
+  background: none; border: none; color: var(--text-secondary);
+  font-size: 0.85rem; cursor: pointer; padding: 0.1rem 0.3rem;
+}
+
+/* ═══════════════ SEARCH PREVIEW ═══════════════ */
+.result-item.previewing { border: 1px solid var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); }
+.result-item.previewing .title { color: var(--accent); }
+
 /* ═══════════════ DESKTOP ═══════════════ */
 @media (min-width: 768px) {
   .view { max-width: 600px; margin: 0 auto; }
