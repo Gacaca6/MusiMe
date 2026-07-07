@@ -1,4 +1,4 @@
-const CACHE_NAME = "musime-static-v19";
+const CACHE_NAME = "musime-static-v20";
 const STATIC_ASSETS = [
   "./",
   "./index.html",
@@ -6,7 +6,10 @@ const STATIC_ASSETS = [
   "./app.js",
   "./manifest.webmanifest",
   "./icons/icon-192.svg",
-  "./icons/icon-512.svg"
+  "./icons/icon-512.svg",
+  "./icons/icon-180.png",
+  "./icons/icon-192.png",
+  "./icons/icon-512.png"
 ];
 
 // Pre-cache all app files on install

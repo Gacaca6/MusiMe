@@ -157,6 +157,7 @@ const nodes = {
   repeatOneBadge: $("repeat-one-badge"),
   npSleep: $("np-sleep"),
   npLyrics: $("np-lyrics"),
+  lyricsCard: $("lyrics-card"),
   lyricsPanel: $("lyrics-panel"),
   sleepMenu: $("sleep-menu"),
   sleepIndicator: $("sleep-indicator"),
@@ -312,7 +313,6 @@ function artHtml(song, className, placeholderClass) {
    Synced lyrics (LRC timestamps) get Spotify-style line highlighting. */
 const LRCLIB_BASE = "https://lrclib.net/api";
 let currentLyrics = null;   // { synced: [{t,text}]|null, plain: string|null } for the current song
-let lyricsOpen = false;
 let activeLyricLine = -1;
 
 async function saveLyrics(songId, obj) {
@@ -384,15 +384,26 @@ function parseLrc(lrc) {
   return out.sort((a, b) => a.t - b.t);
 }
 
-// Load lyrics for the now-playing song into state + panel
+// Load lyrics for the now-playing song. If nothing is cached and we're online,
+// fetch + cache RIGHT NOW — this is how songs downloaded before the lyrics
+// feature get their lyrics: play them once with internet and they're saved
+// for offline forever.
+const lyricsRetriedThisSession = new Set();
 async function loadLyricsForCurrent(song) {
   currentLyrics = null;
   activeLyricLine = -1;
+  renderLyricsPanel(); // hide the card immediately while we load (no stale lyrics)
   let rec = await getLyricsRecord(song.id);
-  if ((!rec || rec.none) && lyricsOpen && navigator.onLine) {
-    // Panel is open and nothing cached — try a live fetch right now
-    rec = await fetchLyricsFromLrclib(song.title, song.artist || "", song.duration || 0);
-    if (rec) { try { await saveLyrics(song.id, rec); } catch {} }
+  // Fetch when nothing is cached; also retry a cached "not found" once per
+  // session — the LRCLIB database grows, so misses can become hits later.
+  const retryNone = rec && rec.none && !lyricsRetriedThisSession.has(song.id);
+  if ((!rec || retryNone) && navigator.onLine) {
+    lyricsRetriedThisSession.add(song.id);
+    const fetched = await fetchLyricsFromLrclib(song.title, song.artist || "", song.duration || 0);
+    if (fetched || !rec) {
+      rec = fetched ? fetched : { none: true };
+      try { await saveLyrics(song.id, rec); } catch {}
+    }
   }
   if (song.id !== currentSongId) return; // song changed while we were loading
   if (rec && !rec.none && (rec.syncedLyrics || rec.plainLyrics)) {
@@ -404,9 +415,13 @@ async function loadLyricsForCurrent(song) {
   renderLyricsPanel();
 }
 
+// Render the lyrics card below the player. Spotify pattern: the card only
+// exists when there ARE lyrics — nobody is forced to look at empty states;
+// you discover it by scrolling down.
 function renderLyricsPanel() {
   const panel = nodes.lyricsPanel;
-  if (!panel) return;
+  const card = nodes.lyricsCard;
+  if (!panel || !card) return;
   panel.innerHTML = "";
   activeLyricLine = -1;
   if (currentLyrics && currentLyrics.synced && currentLyrics.synced.length) {
@@ -418,24 +433,23 @@ function renderLyricsPanel() {
       p.addEventListener("click", () => { try { nodes.audio.currentTime = line.t; } catch {} });
       panel.append(p);
     });
+    card.classList.remove("hidden");
   } else if (currentLyrics && currentLyrics.plain) {
     const d = document.createElement("div");
     d.className = "lyrics-plain";
     d.textContent = currentLyrics.plain;
     panel.append(d);
+    card.classList.remove("hidden");
   } else {
-    const d = document.createElement("div");
-    d.className = "lyrics-empty";
-    d.textContent = navigator.onLine
-      ? "No lyrics found for this song."
-      : "No lyrics saved. Lyrics download automatically when you're online.";
-    panel.append(d);
+    card.classList.add("hidden");
   }
 }
 
-// Called from the audio timeupdate handler — highlights + scrolls the active line
+// Called from the audio timeupdate handler — highlights the active line and
+// scrolls it INSIDE the card only (scrollTop math, never scrollIntoView, so the
+// Now Playing sheet itself never jumps while the user is looking elsewhere).
 function updateLyricsHighlight() {
-  if (!lyricsOpen || !currentLyrics || !currentLyrics.synced || !currentLyrics.synced.length) return;
+  if (!currentLyrics || !currentLyrics.synced || !currentLyrics.synced.length) return;
   const t = nodes.audio.currentTime;
   const lines = currentLyrics.synced;
   let idx = -1;
@@ -449,7 +463,8 @@ function updateLyricsHighlight() {
     const el = panel.querySelector(`.lyric-line[data-i="${idx}"]`);
     if (el) {
       el.classList.add("active");
-      try { el.scrollIntoView({ block: "center", behavior: "smooth" }); } catch { el.scrollIntoView(); }
+      // Center the active line within the card's own scroll area
+      panel.scrollTop = Math.max(0, el.offsetTop - panel.clientHeight / 2 + el.clientHeight / 2);
     }
   }
 }
@@ -1532,21 +1547,17 @@ nodes.npRepeat.addEventListener("click", () => {
   else { repeatMode = "off"; nodes.npRepeat.classList.remove("active"); nodes.repeatOneBadge.classList.add("hidden"); showToast("Repeat off"); }
 });
 
-/* ══════════════ LYRICS TOGGLE ══════════════ */
+/* ══════════════ LYRICS SHORTCUT ══════════════
+   Lyrics live in a card below the player (Spotify pattern — discovered by
+   scrolling, never forced). The top-bar button is just a shortcut to it. */
 nodes.npLyrics.addEventListener("click", () => {
-  lyricsOpen = !lyricsOpen;
-  nodes.nowPlaying.classList.toggle("lyrics-open", lyricsOpen);
-  nodes.npLyrics.classList.toggle("active", lyricsOpen);
-  if (lyricsOpen) {
-    if (!currentLyrics && currentSongId) {
-      // Nothing loaded yet — try cache, then a live fetch if online
-      const s = songs.find((x) => x.id === currentSongId);
-      if (s) loadLyricsForCurrent(s).catch(() => {});
-      else renderLyricsPanel();
-    } else {
-      renderLyricsPanel();
-    }
-    updateLyricsHighlight();
+  if (nodes.lyricsCard && !nodes.lyricsCard.classList.contains("hidden")) {
+    try { nodes.lyricsCard.scrollIntoView({ behavior: "smooth", block: "start" }); }
+    catch { nodes.lyricsCard.scrollIntoView(); }
+  } else if (!navigator.onLine) {
+    showToast("No lyrics saved — play this song online once to fetch them");
+  } else {
+    showToast("No lyrics found for this song");
   }
 });
 

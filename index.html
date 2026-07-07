@@ -9,7 +9,9 @@
     <meta name="apple-mobile-web-app-title" content="MusiMe" />
     <link rel="manifest" href="manifest.webmanifest" />
     <link rel="icon" href="icons/icon-192.svg" type="image/svg+xml" />
-    <link rel="apple-touch-icon" href="icons/icon-192.svg" />
+    <link rel="icon" href="icons/icon-192.png" type="image/png" sizes="192x192" />
+    <!-- iOS home-screen icon MUST be PNG — SVG apple-touch-icons never load -->
+    <link rel="apple-touch-icon" href="icons/icon-180.png" />
     <title>MusiMe</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -217,8 +219,6 @@
         <img id="np-artwork" class="np-artwork" src="" alt="" />
         <div id="np-artwork-placeholder" class="np-artwork placeholder"><span>&#9835;</span></div>
       </div>
-      <!-- Lyrics (offline-cached, synced when available) -->
-      <div id="lyrics-panel" class="lyrics-panel"></div>
       <div class="np-info">
         <p id="np-title" class="np-title">No song selected</p>
         <p id="np-artist" class="np-artist">Choose a track</p>
@@ -249,6 +249,11 @@
           <span id="repeat-one-badge" class="repeat-one-badge hidden">1</span>
         </button>
       </div>
+      <!-- Lyrics card (Spotify-style: scroll down to see it; hidden when no lyrics) -->
+      <section id="lyrics-card" class="lyrics-card hidden">
+        <h3 class="lyrics-card-title">Lyrics</h3>
+        <div id="lyrics-panel" class="lyrics-scroll"></div>
+      </section>
       <!-- Up Next / Queue -->
       <div class="np-queue-section">
         <div class="np-queue-header">
