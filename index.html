@@ -191,6 +191,10 @@
         <button id="np-close" class="np-close" type="button">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
         </button>
+        <!-- Lyrics toggle -->
+        <button id="np-lyrics" class="np-top-btn" type="button" title="Lyrics">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h10M4 18h7"/></svg>
+        </button>
         <!-- Sleep Timer -->
         <button id="np-sleep" class="np-top-btn" type="button" title="Sleep timer">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
@@ -213,6 +217,8 @@
         <img id="np-artwork" class="np-artwork" src="" alt="" />
         <div id="np-artwork-placeholder" class="np-artwork placeholder"><span>&#9835;</span></div>
       </div>
+      <!-- Lyrics (offline-cached, synced when available) -->
+      <div id="lyrics-panel" class="lyrics-panel"></div>
       <div class="np-info">
         <p id="np-title" class="np-title">No song selected</p>
         <p id="np-artist" class="np-artist">Choose a track</p>

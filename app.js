@@ -31,14 +31,24 @@ const SYNC_UID_KEY = "musime-sync-uid";
 
 // Multiple JioSaavn API mirrors. We try each in order on failure.
 // All expose the same /search/songs?query=... endpoint shape.
+// Health-checked 2026-07: jiosavan-api2 + nandanvarma verified live (320kbps,
+// CORS *); jio-saavn-nu and codyandrew were returning 404 and were removed.
 const SAAVN_MIRRORS = [
   "https://jiosavan-api2.vercel.app/api",
+  "https://saavn-api.nandanvarma.com/api",
   "https://saavn.dev/api",
-  "https://jio-saavn-nu.vercel.app/api",
-  "https://jiosaavn-api-codyandrew.vercel.app/api",
 ];
-// Cache the last working mirror so we hit it first next time
+// Cache the last working mirror (persisted so app restarts hit it first)
+const SAAVN_MIRROR_KEY = "musime-saavn-mirror";
 let saavnPreferredMirror = SAAVN_MIRRORS[0];
+try {
+  const savedMirror = localStorage.getItem(SAAVN_MIRROR_KEY);
+  if (savedMirror && SAAVN_MIRRORS.includes(savedMirror)) saavnPreferredMirror = savedMirror;
+} catch {}
+function rememberMirror(m) {
+  saavnPreferredMirror = m;
+  try { localStorage.setItem(SAAVN_MIRROR_KEY, m); } catch {}
+}
 
 let songs = [];
 let playlists = [];
@@ -146,6 +156,8 @@ const nodes = {
   npRepeat: $("np-repeat"),
   repeatOneBadge: $("repeat-one-badge"),
   npSleep: $("np-sleep"),
+  npLyrics: $("np-lyrics"),
+  lyricsPanel: $("lyrics-panel"),
   sleepMenu: $("sleep-menu"),
   sleepIndicator: $("sleep-indicator"),
   sleepTimeLeft: $("sleep-time-left"),
@@ -291,18 +303,201 @@ function artHtml(song, className, placeholderClass) {
   return `<div class="${className} ${placeholderClass || "placeholder"}"><span>&#9835;</span></div>`;
 }
 
+/* ══════════════ LYRICS (offline-cached, LRCLIB) ══════════════
+   Lyrics come from lrclib.net (free, no auth, CORS-open) and are cached in
+   IndexedDB as JSON blobs under "lyr-{songId}" — stored as Blob so the existing
+   full-backup export (blobToDataUrl) handles them transparently. Fetched once
+   when a song is downloaded (or on demand / background migration when online),
+   then available fully OFFLINE forever — matching the app's low-internet goal.
+   Synced lyrics (LRC timestamps) get Spotify-style line highlighting. */
+const LRCLIB_BASE = "https://lrclib.net/api";
+let currentLyrics = null;   // { synced: [{t,text}]|null, plain: string|null } for the current song
+let lyricsOpen = false;
+let activeLyricLine = -1;
+
+async function saveLyrics(songId, obj) {
+  await saveBlob(`lyr-${songId}`, new Blob([JSON.stringify(obj)], { type: "application/json" }));
+}
+async function getLyricsRecord(songId) {
+  try {
+    const blob = await getBlob(`lyr-${songId}`);
+    if (!blob) return null;
+    return JSON.parse(await blob.text());
+  } catch { return null; }
+}
+async function deleteLyrics(songId) {
+  try { await deleteBlob(`lyr-${songId}`); } catch {}
+}
+
+// Query LRCLIB. Returns { syncedLyrics, plainLyrics } raw strings or null.
+async function fetchLyricsFromLrclib(title, artist, duration) {
+  const tryFetch = async (url) => {
+    const res = await fetch(url, { signal: AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined });
+    if (!res.ok) return null;
+    const hits = await res.json();
+    if (!Array.isArray(hits) || !hits.length) return null;
+    // Prefer a duration match (±10s), then prefer synced lyrics
+    const scored = hits.map((h) => {
+      let score = 0;
+      if (duration > 0 && h.duration && Math.abs(h.duration - duration) <= 10) score += 2;
+      if (h.syncedLyrics) score += 1;
+      return { h, score };
+    }).sort((a, b) => b.score - a.score);
+    const best = scored[0].h;
+    if (!best.syncedLyrics && !best.plainLyrics) return null;
+    return { syncedLyrics: best.syncedLyrics || null, plainLyrics: best.plainLyrics || null };
+  };
+  try {
+    const byField = await tryFetch(`${LRCLIB_BASE}/search?artist_name=${encodeURIComponent(artist || "")}&track_name=${encodeURIComponent(title || "")}`);
+    if (byField) return byField;
+    // Fallback: free-text search (helps when artist tags differ)
+    return await tryFetch(`${LRCLIB_BASE}/search?q=${encodeURIComponent(`${title} ${artist || ""}`.trim())}`);
+  } catch { return null; }
+}
+
+// Ensure a song's lyrics are cached locally. Fire-and-forget safe.
+async function ensureLyricsCached(song) {
+  if (!song || !song.id || !song.title) return null;
+  const existing = await getLyricsRecord(song.id);
+  if (existing) return existing;
+  if (!navigator.onLine) return null;
+  const fetched = await fetchLyricsFromLrclib(song.title, song.artist || "", song.duration || 0);
+  // Cache negative results too (as {none:true}) so we don't re-query every time;
+  // migrateLyrics skips entries that exist in any form.
+  const record = fetched ? fetched : { none: true };
+  try { await saveLyrics(song.id, record); } catch {}
+  return fetched;
+}
+
+// Parse LRC "[mm:ss.xx] line" format into [{t, text}]
+function parseLrc(lrc) {
+  const out = [];
+  for (const line of lrc.split("\n")) {
+    const matches = [...line.matchAll(/\[(\d+):(\d+(?:\.\d+)?)\]/g)];
+    if (!matches.length) continue;
+    const text = line.replace(/\[[^\]]*\]/g, "").trim();
+    for (const m of matches) {
+      const t = parseInt(m[1], 10) * 60 + parseFloat(m[2]);
+      if (isFinite(t)) out.push({ t, text });
+    }
+  }
+  return out.sort((a, b) => a.t - b.t);
+}
+
+// Load lyrics for the now-playing song into state + panel
+async function loadLyricsForCurrent(song) {
+  currentLyrics = null;
+  activeLyricLine = -1;
+  let rec = await getLyricsRecord(song.id);
+  if ((!rec || rec.none) && lyricsOpen && navigator.onLine) {
+    // Panel is open and nothing cached — try a live fetch right now
+    rec = await fetchLyricsFromLrclib(song.title, song.artist || "", song.duration || 0);
+    if (rec) { try { await saveLyrics(song.id, rec); } catch {} }
+  }
+  if (song.id !== currentSongId) return; // song changed while we were loading
+  if (rec && !rec.none && (rec.syncedLyrics || rec.plainLyrics)) {
+    currentLyrics = {
+      synced: rec.syncedLyrics ? parseLrc(rec.syncedLyrics) : null,
+      plain: rec.plainLyrics || null,
+    };
+  }
+  renderLyricsPanel();
+}
+
+function renderLyricsPanel() {
+  const panel = nodes.lyricsPanel;
+  if (!panel) return;
+  panel.innerHTML = "";
+  activeLyricLine = -1;
+  if (currentLyrics && currentLyrics.synced && currentLyrics.synced.length) {
+    currentLyrics.synced.forEach((line, i) => {
+      const p = document.createElement("p");
+      p.className = "lyric-line";
+      p.dataset.i = i;
+      p.textContent = line.text || "♪";
+      p.addEventListener("click", () => { try { nodes.audio.currentTime = line.t; } catch {} });
+      panel.append(p);
+    });
+  } else if (currentLyrics && currentLyrics.plain) {
+    const d = document.createElement("div");
+    d.className = "lyrics-plain";
+    d.textContent = currentLyrics.plain;
+    panel.append(d);
+  } else {
+    const d = document.createElement("div");
+    d.className = "lyrics-empty";
+    d.textContent = navigator.onLine
+      ? "No lyrics found for this song."
+      : "No lyrics saved. Lyrics download automatically when you're online.";
+    panel.append(d);
+  }
+}
+
+// Called from the audio timeupdate handler — highlights + scrolls the active line
+function updateLyricsHighlight() {
+  if (!lyricsOpen || !currentLyrics || !currentLyrics.synced || !currentLyrics.synced.length) return;
+  const t = nodes.audio.currentTime;
+  const lines = currentLyrics.synced;
+  let idx = -1;
+  for (let i = 0; i < lines.length; i++) { if (lines[i].t <= t) idx = i; else break; }
+  if (idx === activeLyricLine) return;
+  const panel = nodes.lyricsPanel;
+  const prev = panel.querySelector(".lyric-line.active");
+  if (prev) prev.classList.remove("active");
+  activeLyricLine = idx;
+  if (idx >= 0) {
+    const el = panel.querySelector(`.lyric-line[data-i="${idx}"]`);
+    if (el) {
+      el.classList.add("active");
+      try { el.scrollIntoView({ block: "center", behavior: "smooth" }); } catch { el.scrollIntoView(); }
+    }
+  }
+}
+
+// Background: cache lyrics for existing songs that don't have any yet (online only,
+// gentle pace, capped per session to be polite to LRCLIB).
+async function migrateLyrics() {
+  if (!navigator.onLine) return;
+  let done = 0;
+  for (const song of songs) {
+    if (done >= 25) break;
+    try {
+      const existing = await getBlob(`lyr-${song.id}`);
+      if (existing) continue;
+      await ensureLyricsCached(song);
+      done++;
+      await new Promise((r) => setTimeout(r, 400));
+    } catch {}
+  }
+  if (done > 0) dbg(`lyrics: migrated ${done} song(s)`);
+}
+
 /* ══════════════ METADATA ══════════════ */
 function saveMeta() {
-  localStorage.setItem(SONGS_KEY, JSON.stringify(songs));
-  localStorage.setItem(PLAYLISTS_KEY, JSON.stringify(playlists));
-  localStorage.setItem(PLAYLIST_ORDERS_KEY, JSON.stringify(playlistOrders));
+  try {
+    localStorage.setItem(SONGS_KEY, JSON.stringify(songs));
+    localStorage.setItem(PLAYLISTS_KEY, JSON.stringify(playlists));
+    localStorage.setItem(PLAYLIST_ORDERS_KEY, JSON.stringify(playlistOrders));
+  } catch (e) {
+    // localStorage full/unavailable — keep the app alive, tell the user once
+    dbg(`saveMeta failed: ${e?.message || e}`);
+    showToast("Couldn't save library changes — storage may be full");
+  }
   // Opportunistic cloud write-back (no-op unless sync is configured + signed in).
   try { schedulePush(); } catch {}
 }
 function loadMeta() {
-  songs = JSON.parse(localStorage.getItem(SONGS_KEY) || "[]");
-  playlists = JSON.parse(localStorage.getItem(PLAYLISTS_KEY) || "[]");
-  playlistOrders = JSON.parse(localStorage.getItem(PLAYLIST_ORDERS_KEY) || "{}");
+  // A single corrupted localStorage value must NEVER brick the whole app —
+  // each key is parsed independently with a safe fallback.
+  const safeParse = (key, fallback, check) => {
+    try {
+      const v = JSON.parse(localStorage.getItem(key) || fallback);
+      return check(v) ? v : JSON.parse(fallback);
+    } catch { return JSON.parse(fallback); }
+  };
+  songs = safeParse(SONGS_KEY, "[]", Array.isArray);
+  playlists = safeParse(PLAYLISTS_KEY, "[]", Array.isArray);
+  playlistOrders = safeParse(PLAYLIST_ORDERS_KEY, "{}", (v) => v && typeof v === "object" && !Array.isArray(v));
   if (!playlists.includes("All songs")) playlists.unshift("All songs");
   songs = songs.map((s) => ({ ...s, playlists: Array.isArray(s.playlists) ? s.playlists : [], createdAt: s.createdAt || Date.now(), lastPlayedAt: s.lastPlayedAt || 0, playCount: s.playCount || 0, album: s.album || "", artwork: s.artwork || "", duration: s.duration || 0, saavnId: s.saavnId || "", query: s.query || "", srcUrl: s.srcUrl || "" }));
   normalizePlaylistOrders();
@@ -380,13 +575,13 @@ function parseSaavnResults(data) {
   }).filter((i) => i.url);
 }
 
-async function fetchJioSaavnCandidates(query) {
+async function fetchJioSaavnCandidates(query, page = 1) {
   // Try the preferred mirror first, then the rest in order
   const ordered = [saavnPreferredMirror, ...SAAVN_MIRRORS.filter((m) => m !== saavnPreferredMirror)];
   let lastError = null;
   for (const mirror of ordered) {
     try {
-      const res = await fetch(`${mirror}/search/songs?query=${encodeURIComponent(query)}&limit=30`, {
+      const res = await fetch(`${mirror}/search/songs?query=${encodeURIComponent(query)}&limit=30&page=${page}`, {
         // 8 second timeout per mirror so a slow mirror doesn't block the whole search
         signal: AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined,
       });
@@ -394,10 +589,11 @@ async function fetchJioSaavnCandidates(query) {
       const data = await res.json();
       const results = parseSaavnResults(data);
       if (results.length > 0) {
-        saavnPreferredMirror = mirror; // remember the working one
+        rememberMirror(mirror); // remember the working one (persisted)
         return results;
       }
-      // Empty result — try the next mirror
+      // Empty result — try the next mirror (unless we're paginating past the end)
+      if (page > 1) return [];
     } catch (err) {
       lastError = err;
       // Try next mirror
@@ -408,27 +604,56 @@ async function fetchJioSaavnCandidates(query) {
 }
 
 /* ══════════════ SEARCH ══════════════ */
-async function searchRemoteSongs(query) {
-  const q = query.replace(/\s+/g, " ").trim();
-  if (!q) { remoteResults = []; renderRemoteResults(); return; }
-  showToast("Searching...");
-  try {
-    remoteResults = await fetchJioSaavnCandidates(q);
-  } catch {
-    remoteResults = [];
-  }
-  // De-dupe by title+artist
+// Pagination state for "Load more" — reset on every new query.
+let searchState = { query: "", page: 1, more: false, loading: false };
+
+function dedupeResults(list) {
   const seen = new Set();
-  remoteResults = remoteResults.filter((i) => {
+  return list.filter((i) => {
     const k = `${i.title.toLowerCase()}|${(i.artist || "").toLowerCase()}`;
     if (seen.has(k)) return false;
     seen.add(k);
     return true;
   });
-  remoteResults = remoteResults.slice(0, 40);
+}
+
+async function searchRemoteSongs(query) {
+  const q = query.replace(/\s+/g, " ").trim();
+  if (!q) { remoteResults = []; searchState = { query: "", page: 1, more: false, loading: false }; renderRemoteResults(); return; }
+  searchState = { query: q, page: 1, more: false, loading: true };
+  // Inline searching state so the user isn't staring at stale results
+  nodes.searchResults.innerHTML = `<div class="empty-state"><div class="empty-icon">&#9835;</div><p>Searching&hellip;</p></div>`;
+  let batch = [];
+  try {
+    batch = await fetchJioSaavnCandidates(q, 1);
+  } catch {
+    batch = [];
+  }
+  searchState.loading = false;
+  // A full page suggests more pages exist
+  searchState.more = batch.length >= 25;
+  remoteResults = dedupeResults(batch);
   // Remember the query that surfaced each result — a cheap fallback re-download
   // key if the saavnId ever stops resolving.
   remoteResults.forEach((r) => { r.query = q; });
+  renderRemoteResults();
+}
+
+async function loadMoreResults() {
+  if (searchState.loading || !searchState.more || !searchState.query) return;
+  searchState.loading = true;
+  renderRemoteResults(); // shows "Loading…" on the button
+  let batch = [];
+  try {
+    batch = await fetchJioSaavnCandidates(searchState.query, searchState.page + 1);
+  } catch {
+    batch = [];
+  }
+  searchState.page += 1;
+  searchState.loading = false;
+  searchState.more = batch.length >= 25;
+  batch.forEach((r) => { r.query = searchState.query; });
+  remoteResults = dedupeResults([...remoteResults, ...batch]);
   renderRemoteResults();
 }
 
@@ -458,16 +683,31 @@ async function processQueue() {
       if (!next) break;
       next.state = "downloading"; next.progress = 10; renderQueue();
       try {
-        const blob = await fetchAudioBlob(next.result.url, (p) => { next.progress = p; renderQueue(); });
+        // One automatic retry — flaky mobile connections drop mid-download
+        let blob;
+        try {
+          blob = await fetchAudioBlob(next.result.url, (p) => { next.progress = p; renderQueue(); });
+        } catch (firstErr) {
+          dbg(`download retry for "${next.result.title}": ${firstErr?.message || firstErr}`);
+          next.progress = 10; renderQueue();
+          blob = await fetchAudioBlob(next.result.url, (p) => { next.progress = p; renderQueue(); });
+        }
         const songId = await addSong({ title: next.result.title, artist: next.result.artist, source: next.result.source, blob, album: next.result.album || "", artwork: next.result.artwork || "", duration: next.result.duration || 0, saavnId: next.result.saavnId || "", query: next.result.query || "" });
         // Cache artwork locally for offline use
         if (next.result.artwork && songId) {
           await cacheArtworkFromUrl(songId, next.result.artwork);
           render(); // Re-render with local artwork
         }
+        // Cache lyrics while we're online so they work offline later (non-blocking)
+        if (songId) ensureLyricsCached({ id: songId, title: next.result.title, artist: next.result.artist, duration: next.result.duration || 0 }).catch(() => {});
         next.state = "done"; next.progress = 100;
         showToast(next.result.isPreview ? "Preview saved" : "Song saved offline");
-      } catch { next.state = "failed"; showToast("Download failed"); }
+      } catch (e) {
+        next.state = "failed";
+        const quota = e && (e.name === "QuotaExceededError" || /quota/i.test(e.message || ""));
+        showToast(quota ? "Storage full — delete some songs first" : "Download failed");
+        dbg(`download failed "${next.result.title}": ${e?.message || e}`);
+      }
       renderQueue();
       await new Promise((r) => setTimeout(r, 400));
       downloadQueue = downloadQueue.filter((j) => j.id !== next.id);
@@ -514,6 +754,16 @@ function renderRemoteResults() {
     row.querySelector(".result-actions").append(btn);
     nodes.searchResults.append(row);
   });
+  // "Load more" pagination — only when the last page came back full
+  if (searchState.more || searchState.loading) {
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "pill-btn wide load-more-btn";
+    more.textContent = searchState.loading ? "Loading…" : "Load more results";
+    more.disabled = searchState.loading;
+    more.addEventListener("click", () => loadMoreResults());
+    nodes.searchResults.append(more);
+  }
 }
 
 /* ══════════════ LIBRARY ══════════════ */
@@ -731,6 +981,7 @@ async function restorePlaybackState() {
     updateMediaSession(song, localArt);
     setPlayingState(false); // Restored paused — user must tap play
     renderSongs();
+    loadLyricsForCurrent(song).catch(() => {});
   } catch {}
 }
 
@@ -790,6 +1041,8 @@ async function playSong(song, startTime = 0) {
   // MediaMetadata/artwork failure can NEVER prevent playback.
   try { updateMediaSession(song, localArt); } catch (e) { dbg(`updateMediaSession threw: ${e?.message || e}`); }
   renderNpQueue();
+  // Lyrics: load from cache (or fetch if panel open + online) — never blocks playback
+  loadLyricsForCurrent(song).catch(() => {});
 
   try { await nodes.audio.play(); setPlayingState(true); dbg(`play ok: ${audioStateStr()}`); }
   catch (e) { dbg(`playSong play() rejected: ${e?.message || e}`); showToast("Tap play to start"); }
@@ -1199,6 +1452,7 @@ nodes.audio.addEventListener("timeupdate", () => {
   nodes.npCurrent.textContent = formatTime(currentTime);
   nodes.npDuration.textContent = formatTime(duration);
   updatePositionState();
+  updateLyricsHighlight();
   schedulePlaybackSave();
 });
 
@@ -1278,6 +1532,24 @@ nodes.npRepeat.addEventListener("click", () => {
   else { repeatMode = "off"; nodes.npRepeat.classList.remove("active"); nodes.repeatOneBadge.classList.add("hidden"); showToast("Repeat off"); }
 });
 
+/* ══════════════ LYRICS TOGGLE ══════════════ */
+nodes.npLyrics.addEventListener("click", () => {
+  lyricsOpen = !lyricsOpen;
+  nodes.nowPlaying.classList.toggle("lyrics-open", lyricsOpen);
+  nodes.npLyrics.classList.toggle("active", lyricsOpen);
+  if (lyricsOpen) {
+    if (!currentLyrics && currentSongId) {
+      // Nothing loaded yet — try cache, then a live fetch if online
+      const s = songs.find((x) => x.id === currentSongId);
+      if (s) loadLyricsForCurrent(s).catch(() => {});
+      else renderLyricsPanel();
+    } else {
+      renderLyricsPanel();
+    }
+    updateLyricsHighlight();
+  }
+});
+
 /* ══════════════ SLEEP TIMER ══════════════ */
 nodes.npSleep.addEventListener("click", () => { nodes.sleepMenu.classList.toggle("hidden"); });
 document.querySelectorAll(".sleep-option").forEach((btn) => {
@@ -1327,6 +1599,7 @@ async function removeSong(id) {
   userQueue = userQueue.filter((s) => s.id !== id);
   await deleteBlob(id);
   await deleteArtwork(id);
+  await deleteLyrics(id);
   if (artCache.has(id)) { URL.revokeObjectURL(artCache.get(id)); artCache.delete(id); }
   // If we deleted the currently-restored song, clear playback state
   if (currentSongId === id) {
@@ -1516,6 +1789,7 @@ async function restoreMissingAudio() {
         const blob = await fetchAudioBlob(url, () => {});
         await saveBlob(s.id, blob);
         if (s.artwork) { try { await cacheArtworkFromUrl(s.id, s.artwork); } catch {} }
+        ensureLyricsCached(s).catch(() => {}); // lyrics too, while online
         if (s.needsReadd) { delete s.needsReadd; }
         done++; saveMeta(); render();
         dbg(`restore: ok "${s.title}"`);
@@ -1869,6 +2143,16 @@ async function requestPersistence() {
   }
 }
 
+/* ══════════════ GLOBAL ERROR SAFETY NET ══════════════
+   Never let an unexpected error pass silently — capture it in the diagnostics
+   log (visible via Settings → Playback Diagnostics) without disturbing the user. */
+window.addEventListener("error", (e) => {
+  try { dbg(`UNCAUGHT: ${e.message} @ ${(e.filename || "").split("/").pop()}:${e.lineno}`); } catch {}
+});
+window.addEventListener("unhandledrejection", (e) => {
+  try { dbg(`UNHANDLED PROMISE: ${e.reason?.message || e.reason}`); } catch {}
+});
+
 /* ══════════════ INIT ══════════════ */
 dbg(`=== page load (standalone=${window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true}) ===`);
 loadMeta();
@@ -1888,6 +2172,8 @@ registerMediaHandlers();
   requestPersistence();
   // Migrate artwork for existing songs that were downloaded before this update
   migrateArtwork();
+  // Cache lyrics for existing songs in the background (online only, gentle pace)
+  migrateLyrics();
   // Optional cloud sync — inert unless FIREBASE_CONFIG is filled in. Never blocks
   // offline use; runs after everything local is ready.
   initCloudSync();
