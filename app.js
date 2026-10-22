@@ -168,6 +168,27 @@ const nodes = {
   npLyrics: $("np-lyrics"),
   lyricsCard: $("lyrics-card"),
   lyricsPanel: $("lyrics-panel"),
+  lyricsShowFull: $("lyrics-show-full"),
+  lyricsSource: $("lyrics-source"),
+  lyricsFull: $("lyrics-full"),
+  lfClose: $("lf-close"),
+  lfTitle: $("lf-title"),
+  lfArtist: $("lf-artist"),
+  lfScroll: $("lf-scroll"),
+  lfProgressFill: $("lf-progress-fill"),
+  lfCurrent: $("lf-current"),
+  lfDuration: $("lf-duration"),
+  lfPlay: $("lf-play"),
+  lfPlayIcon: $("lf-play-icon"),
+  lfPauseIcon: $("lf-pause-icon"),
+  npSpeed: $("np-speed"),
+  npDj: $("np-dj"),
+  npDjInfo: $("np-dj-info"),
+  djToggle: $("dj-toggle"),
+  importListForm: $("import-list-form"),
+  importListText: $("import-list-text"),
+  importListPlaylist: $("import-list-playlist"),
+  importListStatus: $("import-list-status"),
   sleepMenu: $("sleep-menu"),
   sleepIndicator: $("sleep-indicator"),
   sleepTimeLeft: $("sleep-time-left"),
@@ -378,13 +399,42 @@ async function fetchLyricsFromLrclib(title, artist, duration) {
   } catch { return null; }
 }
 
+// Second provider: JioSaavn's own lyrics (plain text, "<br>" line breaks), only
+// for songs downloaded from JioSaavn (we store saavnId at download time).
+async function fetchLyricsFromSaavn(saavnId) {
+  if (!saavnId) return null;
+  const ordered = [saavnPreferredMirror, ...SAAVN_MIRRORS.filter((m) => m !== saavnPreferredMirror)];
+  for (const mirror of ordered) {
+    try {
+      const res = await fetch(`${mirror}/songs/${encodeURIComponent(saavnId)}/lyrics`, { signal: AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined });
+      if (res.status === 404) return null; // mirror answered: this song has no lyrics
+      if (!res.ok) continue;
+      const data = await res.json();
+      const raw = data?.data?.lyrics;
+      if (!raw) return null;
+      const text = decodeHtml(String(raw).replace(/<br\s*\/?>/gi, "\n")).trim();
+      return text ? { syncedLyrics: null, plainLyrics: text } : null;
+    } catch {}
+  }
+  return null;
+}
+
+// Try every provider in order: synced-capable LRCLIB first, then JioSaavn.
+async function fetchLyricsAny(song) {
+  const l = await fetchLyricsFromLrclib(song.title, song.artist || "", song.duration || 0);
+  if (l) return { ...l, source: "lrclib" };
+  const s = await fetchLyricsFromSaavn(song.saavnId);
+  if (s) return { ...s, source: "jiosaavn" };
+  return null;
+}
+
 // Ensure a song's lyrics are cached locally. Fire-and-forget safe.
 async function ensureLyricsCached(song) {
   if (!song || !song.id || !song.title) return null;
   const existing = await getLyricsRecord(song.id);
   if (existing) return existing;
   if (!navigator.onLine) return null;
-  const fetched = await fetchLyricsFromLrclib(song.title, song.artist || "", song.duration || 0);
+  const fetched = await fetchLyricsAny(song);
   // Cache negative results too (as {none:true}) so we don't re-query every time;
   // migrateLyrics skips entries that exist in any form.
   const record = fetched ? fetched : { none: true };
@@ -422,7 +472,7 @@ async function loadLyricsForCurrent(song) {
   const retryNone = rec && rec.none && !lyricsRetriedThisSession.has(song.id);
   if ((!rec || retryNone) && navigator.onLine) {
     lyricsRetriedThisSession.add(song.id);
-    const fetched = await fetchLyricsFromLrclib(song.title, song.artist || "", song.duration || 0);
+    const fetched = await fetchLyricsAny(song);
     if (fetched || !rec) {
       rec = fetched ? fetched : { none: true };
       try { await saveLyrics(song.id, rec); } catch {}
@@ -433,6 +483,7 @@ async function loadLyricsForCurrent(song) {
     currentLyrics = {
       synced: rec.syncedLyrics ? parseLrc(rec.syncedLyrics) : null,
       plain: rec.plainLyrics || null,
+      source: rec.source || "lrclib", // records cached before providers existed were LRCLIB
     };
   }
   renderLyricsPanel();
@@ -441,54 +492,131 @@ async function loadLyricsForCurrent(song) {
 // Render the lyrics card below the player. Spotify pattern: the card only
 // exists when there ARE lyrics — nobody is forced to look at empty states;
 // you discover it by scrolling down.
+const LYRICS_SOURCE_LABEL = { lrclib: "LRCLIB", jiosaavn: "JioSaavn" };
+let cardLineEls = [];
+let fullLineEls = [];
+let lfUserScrollUntil = 0; // pause auto-follow while the user reads/scrolls
+
+function buildLyricsInto(container, interactive) {
+  const els = [];
+  if (currentLyrics.synced && currentLyrics.synced.length) {
+    currentLyrics.synced.forEach((line) => {
+      const p = document.createElement("p");
+      p.className = "lyric-line";
+      p.textContent = line.text || "♪";
+      if (interactive) p.addEventListener("click", () => { try { nodes.audio.currentTime = line.t; lfUserScrollUntil = 0; } catch {} });
+      container.append(p);
+      els.push(p);
+    });
+  } else {
+    const d = document.createElement("div");
+    d.className = "lyrics-plain";
+    d.textContent = currentLyrics.plain;
+    container.append(d);
+  }
+  return els;
+}
+
+// Render the lyrics card below the player (Spotify pattern: it only exists when
+// there ARE lyrics, nobody is forced to read; you discover it by scrolling) and
+// the full-screen view behind "Show lyrics".
 function renderLyricsPanel() {
   const panel = nodes.lyricsPanel;
   const card = nodes.lyricsCard;
   if (!panel || !card) return;
   panel.innerHTML = "";
+  cardLineEls = [];
   activeLyricLine = -1;
-  if (currentLyrics && currentLyrics.synced && currentLyrics.synced.length) {
-    currentLyrics.synced.forEach((line, i) => {
-      const p = document.createElement("p");
-      p.className = "lyric-line";
-      p.dataset.i = i;
-      p.textContent = line.text || "♪";
-      p.addEventListener("click", () => { try { nodes.audio.currentTime = line.t; } catch {} });
-      panel.append(p);
-    });
-    card.classList.remove("hidden");
-  } else if (currentLyrics && currentLyrics.plain) {
-    const d = document.createElement("div");
-    d.className = "lyrics-plain";
-    d.textContent = currentLyrics.plain;
-    panel.append(d);
-    card.classList.remove("hidden");
-  } else {
+  if (!currentLyrics || !(currentLyrics.synced?.length || currentLyrics.plain)) {
     card.classList.add("hidden");
+    renderFullLyrics();
+    if (nodes.lyricsFull && !nodes.lyricsFull.classList.contains("hidden")) closeFullLyrics();
+    return;
   }
+  const glide = document.createElement("div");
+  glide.className = "lyrics-glide";
+  cardLineEls = buildLyricsInto(glide, false);
+  panel.append(glide);
+  if (nodes.lyricsSource) nodes.lyricsSource.textContent = `Lyrics: ${LYRICS_SOURCE_LABEL[currentLyrics.source] || "LRCLIB"}`;
+  card.classList.remove("hidden");
+  renderFullLyrics();
+  updateLyricsHighlight(true);
 }
 
-// Called from the audio timeupdate handler — highlights the active line and
-// scrolls it INSIDE the card only (scrollTop math, never scrollIntoView, so the
-// Now Playing sheet itself never jumps while the user is looking elsewhere).
-function updateLyricsHighlight() {
+function renderFullLyrics() {
+  const box = nodes.lfScroll;
+  if (!box) return;
+  box.innerHTML = "";
+  fullLineEls = [];
+  if (!currentLyrics || !(currentLyrics.synced?.length || currentLyrics.plain)) return;
+  fullLineEls = buildLyricsInto(box, true);
+  const attrib = document.createElement("p");
+  attrib.className = "lf-attrib";
+  attrib.textContent = `Lyrics provided by ${LYRICS_SOURCE_LABEL[currentLyrics.source] || "LRCLIB"} · saved on your phone for offline`;
+  box.append(attrib);
+}
+
+function isFullLyricsOpen() { return nodes.lyricsFull && !nodes.lyricsFull.classList.contains("hidden"); }
+
+function openFullLyrics() {
+  if (!currentLyrics || !(currentLyrics.synced?.length || currentLyrics.plain)) {
+    showToast(navigator.onLine ? "No lyrics found for this song" : "No lyrics saved — play this song online once to fetch them");
+    return;
+  }
+  nodes.lfTitle.textContent = nodes.npTitle.textContent;
+  nodes.lfArtist.textContent = nodes.npArtist.textContent;
+  nodes.lyricsFull.classList.remove("hidden");
+  lfUserScrollUntil = 0;
+  syncFullPlayIcon();
+  updateFullProgress();
+  nodes.lfScroll.scrollTop = 0;
+  requestAnimationFrame(() => updateLyricsHighlight(true));
+}
+function closeFullLyrics() { nodes.lyricsFull.classList.add("hidden"); }
+
+function syncFullPlayIcon() {
+  if (!nodes.lfPlayIcon) return;
+  nodes.lfPlayIcon.classList.toggle("hidden", isPlaying);
+  nodes.lfPauseIcon.classList.toggle("hidden", !isPlaying);
+}
+function updateFullProgress() {
+  if (!isFullLyricsOpen()) return;
+  const { currentTime, duration } = nodes.audio;
+  const pct = duration ? (currentTime / duration) * 100 : 0;
+  nodes.lfProgressFill.style.width = `${pct}%`;
+  nodes.lfCurrent.textContent = formatTime(currentTime);
+  nodes.lfDuration.textContent = formatTime(duration);
+}
+
+// Called from timeupdate. Colors lines (past / active / upcoming), glides the
+// card's lines (CSS transform, never scrolls the sheet), and follows along in
+// the full-screen view unless the user is scrolling to read ahead.
+function updateLyricsHighlight(force = false) {
   if (!currentLyrics || !currentLyrics.synced || !currentLyrics.synced.length) return;
   const t = nodes.audio.currentTime;
   const lines = currentLyrics.synced;
   let idx = -1;
   for (let i = 0; i < lines.length; i++) { if (lines[i].t <= t) idx = i; else break; }
-  if (idx === activeLyricLine) return;
-  const panel = nodes.lyricsPanel;
-  const prev = panel.querySelector(".lyric-line.active");
-  if (prev) prev.classList.remove("active");
+  if (idx === activeLyricLine && !force) return;
   activeLyricLine = idx;
-  if (idx >= 0) {
-    const el = panel.querySelector(`.lyric-line[data-i="${idx}"]`);
-    if (el) {
-      el.classList.add("active");
-      // Center the active line within the card's own scroll area
-      panel.scrollTop = Math.max(0, el.offsetTop - panel.clientHeight / 2 + el.clientHeight / 2);
-    }
+  const paint = (els) => els.forEach((el, i) => {
+    el.classList.toggle("active", i === idx);
+    el.classList.toggle("past", i < idx);
+  });
+  paint(cardLineEls);
+  paint(fullLineEls);
+  // Card: glide so the active line sits about a third of the way down
+  const glide = nodes.lyricsPanel && nodes.lyricsPanel.firstElementChild;
+  if (glide && cardLineEls.length) {
+    const target = cardLineEls[Math.max(0, idx)];
+    const off = Math.max(0, target.offsetTop - nodes.lyricsPanel.clientHeight * 0.3);
+    glide.style.transform = `translateY(${-off}px)`;
+  }
+  // Full view: follow the active line
+  if (isFullLyricsOpen() && fullLineEls.length && idx >= 0 && Date.now() > lfUserScrollUntil) {
+    const box = nodes.lfScroll;
+    const top = Math.max(0, fullLineEls[idx].offsetTop - box.clientHeight * 0.3);
+    try { box.scrollTo({ top, behavior: "smooth" }); } catch { box.scrollTop = top; }
   }
 }
 
@@ -738,7 +866,11 @@ async function processQueue() {
           render(); // Re-render with local artwork
         }
         // Cache lyrics while we're online so they work offline later (non-blocking)
-        if (songId) ensureLyricsCached({ id: songId, title: next.result.title, artist: next.result.artist, duration: next.result.duration || 0 }).catch(() => {});
+        if (songId) ensureLyricsCached({ id: songId, title: next.result.title, artist: next.result.artist, duration: next.result.duration || 0, saavnId: next.result.saavnId || "" }).catch(() => {});
+        // Song-list import: file the new song into the chosen playlist
+        if (songId && next.result.importPlaylist) addToPlaylistById(songId, next.result.importPlaylist);
+        // DJ Mix: analyse new downloads right away (offline, one at a time)
+        if (songId && djMode) runDjAnalysisQueue();
         next.state = "done"; next.progress = 100;
         showToast(next.result.isPreview ? "Preview saved" : "Song saved offline");
       } catch (e) {
@@ -1113,12 +1245,291 @@ async function restorePlaybackState() {
     setPlayingState(false); // Restored paused — user must tap play
     renderSongs();
     loadLyricsForCurrent(song).catch(() => {});
+    applyPlaybackSpeed();
+    applyAlbumColor(song).catch(() => {});
   } catch {}
+}
+
+/* ══════════════ ALBUM COLOR (offline) ══════════════
+   Pulls the dominant color from the song's CACHED artwork (blob URL: works
+   offline and never taints the canvas) and tints the player + lyrics with it,
+   like Spotify. 24x24 sample — negligible cost even on old phones. */
+const albumColorCache = new Map();
+function rgbToHsl(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h = 0, s = 0; const l = (max + min) / 2;
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    h = max === r ? (g - b) / d + (g < b ? 6 : 0) : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+    h /= 6;
+  }
+  return [h, s, l];
+}
+function hslToRgbStr(h, s, l) {
+  const f = (n) => {
+    const k = (n + h * 12) % 12;
+    const a = s * Math.min(l, 1 - l);
+    return Math.round(255 * (l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1))));
+  };
+  return `rgb(${f(0)},${f(8)},${f(4)})`;
+}
+function extractAlbumColor(url) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const c = document.createElement("canvas");
+        c.width = c.height = 24;
+        const ctx = c.getContext("2d");
+        ctx.drawImage(img, 0, 0, 24, 24);
+        const d = ctx.getImageData(0, 0, 24, 24).data;
+        let r = 0, g = 0, b = 0, w = 0;
+        for (let i = 0; i < d.length; i += 4) {
+          const max = Math.max(d[i], d[i + 1], d[i + 2]), min = Math.min(d[i], d[i + 1], d[i + 2]);
+          const lum = (max + min) / 510;
+          if (lum < 0.07 || lum > 0.95) continue; // ignore near-black/white
+          const sat = max ? (max - min) / max : 0;
+          const wt = 0.15 + sat * sat * 3; // favour vivid pixels
+          r += d[i] * wt; g += d[i + 1] * wt; b += d[i + 2] * wt; w += wt;
+        }
+        resolve(w ? [r / w, g / w, b / w] : null);
+      } catch { resolve(null); }
+    };
+    img.onerror = () => resolve(null);
+    img.src = url;
+  });
+}
+async function applyAlbumColor(song) {
+  if (!song) return;
+  let rgb = albumColorCache.get(song.id);
+  if (rgb === undefined) {
+    const url = artCache.get(song.id); // local cached art only
+    rgb = url ? await extractAlbumColor(url) : null;
+    albumColorCache.set(song.id, rgb);
+  }
+  if (song.id !== currentSongId) return;
+  const root = document.documentElement.style;
+  if (!rgb) { root.removeProperty("--np-color"); root.removeProperty("--lyr-color"); return; }
+  const [h, s] = rgbToHsl(rgb[0], rgb[1], rgb[2]);
+  if (s < 0.12) { // greyscale art: neutral tint instead of a random hue
+    root.setProperty("--np-color", "rgb(42,42,52)");
+    root.setProperty("--lyr-color", "rgb(92,92,108)");
+    return;
+  }
+  const sat = Math.min(0.85, Math.max(0.35, s));
+  root.setProperty("--np-color", hslToRgbStr(h, sat, 0.24));                 // deep backdrop
+  root.setProperty("--lyr-color", hslToRgbStr(h, Math.min(0.8, sat), 0.4)); // lifted for lyrics
+}
+
+/* ══════════════ PLAYBACK SPEED ══════════════ */
+const SPEED_KEY = "musime-speed";
+const SPEEDS = [1, 1.25, 1.5, 2, 0.75];
+let playbackSpeed = 1;
+try { const v = parseFloat(localStorage.getItem(SPEED_KEY)); if (SPEEDS.includes(v)) playbackSpeed = v; } catch {}
+function applyPlaybackSpeed() {
+  const a = nodes.audio;
+  try { a.defaultPlaybackRate = playbackSpeed; } catch {} // survives src changes / load()
+  try { a.playbackRate = playbackSpeed; } catch {}
+  try { a.preservesPitch = true; a.webkitPreservesPitch = true; } catch {} // no chipmunk voices
+  if (nodes.npSpeed) {
+    nodes.npSpeed.textContent = `${playbackSpeed}×`;
+    nodes.npSpeed.classList.toggle("active", playbackSpeed !== 1);
+  }
+}
+
+/* ══════════════ SMART DJ MODE ══════════════
+   Works on every phone because it never mixes audio: each song is analysed
+   ONCE, offline, on the phone (tempo, energy, silent intro/outro) and the
+   profile is stored like lyrics ("dj-{id}"). DJ Mix then orders songs into an
+   energy curve (warm-up -> peak -> cool-down) and skips dead air at the start
+   and end of songs. Playback stays on the single audio element, so the
+   lock-screen pipeline is untouched. */
+const DJ_KEY = "musime-dj";
+let djMode = false;
+try { djMode = localStorage.getItem(DJ_KEY) === "1"; } catch {}
+const djProfiles = new Map();
+let currentDjProfile = null;
+let djAdvancedFor = null;
+
+async function getDjProfile(id) {
+  if (djProfiles.has(id)) return djProfiles.get(id);
+  try {
+    const b = await getBlob(`dj-${id}`);
+    if (b) { const p = JSON.parse(await b.text()); djProfiles.set(id, p); return p; }
+  } catch {}
+  return null;
+}
+async function saveDjProfile(id, p) {
+  djProfiles.set(id, p);
+  try { await saveBlob(`dj-${id}`, new Blob([JSON.stringify(p)], { type: "application/json" })); } catch {}
+}
+async function deleteDjProfile(id) {
+  djProfiles.delete(id);
+  try { await deleteBlob(`dj-${id}`); } catch {}
+}
+async function loadDjProfiles() {
+  for (const s of songs) await getDjProfile(s.id);
+}
+function usableProfile(p) { return p && !p.failed && typeof p.energy === "number" ? p : null; }
+
+// Decode at a low sample rate: analysis doesn't need hi-fi, and it keeps
+// memory small on cheap phones (~20MB for a 4-minute song).
+function decodeForAnalysis(arrayBuf) {
+  const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  if (!OAC) return Promise.reject(new Error("OfflineAudioContext unsupported"));
+  let ctx = null;
+  for (const sr of [11025, 22050, 44100]) { try { ctx = new OAC(1, sr, sr); break; } catch {} }
+  if (!ctx) return Promise.reject(new Error("could not create OfflineAudioContext"));
+  return new Promise((resolve, reject) => {
+    try {
+      const p = ctx.decodeAudioData(arrayBuf, resolve, reject); // old Safari: callbacks only
+      if (p && p.then) p.then(resolve, reject);
+    } catch (e) { reject(e); }
+  });
+}
+
+async function analyzeAudioBlob(blob) {
+  const buf = await decodeForAnalysis(await blob.arrayBuffer());
+  const sr = buf.sampleRate, n = buf.length;
+  const ch0 = buf.getChannelData(0);
+  const ch1 = buf.numberOfChannels > 1 ? buf.getChannelData(1) : null;
+  const hop = Math.max(1, Math.round(sr / 100)); // 10ms frames
+  const frames = Math.floor(n / hop);
+  const env = new Float32Array(frames);
+  let peak = 0, sum = 0;
+  for (let f = 0; f < frames; f++) {
+    let acc = 0;
+    for (let i = f * hop, end = i + hop; i < end; i++) {
+      const v = ch1 ? (ch0[i] + ch1[i]) * 0.5 : ch0[i];
+      acc += v * v;
+    }
+    const rms = Math.sqrt(acc / hop);
+    env[f] = rms; sum += rms;
+    if (rms > peak) peak = rms;
+  }
+  const dur = n / sr;
+  // Silent intro / outro
+  const thr = Math.max(0.006, peak * 0.05);
+  let first = 0; while (first < frames && env[first] < thr) first++;
+  let last = frames - 1; while (last > 0 && env[last] < thr) last--;
+  const introRaw = first / 100;
+  const intro = introRaw > 0.4 ? Math.min(introRaw, 15) : 0;
+  let outro = (last + 1) / 100 + 0.25;
+  if (dur - outro < 0.8 || outro < dur * 0.5) outro = 0; // nothing worth trimming
+  // Energy: average loudness mapped to 0..1
+  const db = 20 * Math.log10(Math.max(sum / Math.max(1, frames), 1e-6));
+  const energy = Math.max(0, Math.min(1, (db + 32) / 24));
+  // Tempo: autocorrelate onset strength over up to 60s from the middle
+  const a0 = Math.max(1, Math.floor(frames / 2) - 3000), a1 = Math.min(frames, a0 + 6000);
+  const on = new Float32Array(Math.max(0, a1 - a0));
+  for (let f = a0; f < a1; f++) on[f - a0] = Math.max(0, env[f] - env[f - 1]);
+  const ac = new Float32Array(102);
+  let bestLag = 0;
+  for (let lag = 33; lag <= 100; lag++) { // 180..60 BPM at 100 frames/s
+    let s = 0;
+    for (let i = 0; i + lag < on.length; i++) s += on[i] * on[i + lag];
+    ac[lag] = s;
+    if (!bestLag || s > ac[bestLag]) bestLag = lag;
+  }
+  let bpm = 0;
+  if (bestLag && ac[bestLag] > 0) {
+    const y0 = ac[bestLag - 1] || 0, y1 = ac[bestLag], y2 = ac[bestLag + 1] || 0;
+    const denom = y0 - 2 * y1 + y2;
+    const shift = denom ? (0.5 * (y0 - y2)) / denom : 0;
+    bpm = 6000 / (bestLag + (Math.abs(shift) < 1 ? shift : 0));
+    while (bpm < 70) bpm *= 2;
+    while (bpm > 175) bpm /= 2;
+    bpm = Math.round(bpm);
+  }
+  const r2 = (x) => Math.round(x * 100) / 100;
+  return { v: 1, bpm, energy: r2(energy), intro: r2(intro), outro: r2(outro), dur: Math.round(dur * 10) / 10 };
+}
+
+// Analyse songs that have no profile yet: one at a time, only while the app is
+// open, with pauses so cheap phones stay smooth. Needs no internet.
+let djQueueRunning = false;
+async function runDjAnalysisQueue() {
+  if (djQueueRunning || !djMode) return;
+  djQueueRunning = true;
+  let done = 0;
+  try {
+    for (const s of [...songs]) {
+      if (!djMode || document.visibilityState === "hidden") break;
+      if (await getDjProfile(s.id)) continue;
+      const blob = await getBlob(s.id);
+      if (!blob) continue;
+      try {
+        const p = await analyzeAudioBlob(blob);
+        await saveDjProfile(s.id, p);
+        done++;
+        dbg(`dj: "${s.title}" bpm=${p.bpm} energy=${p.energy} intro=${p.intro} outro=${p.outro}`);
+      } catch (e) {
+        await saveDjProfile(s.id, { v: 1, failed: true }); // don't retry forever
+        dbg(`dj: analysis failed "${s.title}": ${e?.message || e}`);
+      }
+      if (s.id === currentSongId) { currentDjProfile = usableProfile(djProfiles.get(s.id)); updateDjInfo(); }
+      await new Promise((r) => setTimeout(r, 1200));
+    }
+  } finally {
+    djQueueRunning = false;
+    if (done) renderNpQueue();
+  }
+}
+
+// Energy curve: low -> high -> low. Analysed songs first, the rest after.
+function djOrder(list) {
+  const known = [], unknown = [];
+  for (const s of list) (usableProfile(djProfiles.get(s.id)) ? known : unknown).push(s);
+  known.sort((a, b) => {
+    const pa = djProfiles.get(a.id), pb = djProfiles.get(b.id);
+    return pa.energy - pb.energy || (pa.bpm || 0) - (pb.bpm || 0);
+  });
+  const rise = [], fall = [];
+  known.forEach((s, i) => (i % 2 === 0 ? rise : fall).push(s));
+  return [...rise, ...fall.reverse(), ...unknown];
+}
+
+function updateDjInfo() {
+  const el = nodes.npDjInfo;
+  if (!el) return;
+  if (!djMode) { el.classList.add("hidden"); return; }
+  const p = currentDjProfile;
+  if (p) {
+    const bars = Math.max(1, Math.round(p.energy * 5));
+    // BPM is a rough on-device estimate (fine for ordering, not exact enough to
+    // show — it can lock onto a 4:3 rhythm), so only the energy meter is shown.
+    el.textContent = `DJ MIX · ENERGY ${"▮".repeat(bars)}${"▯".repeat(5 - bars)}`;
+  } else {
+    el.textContent = "DJ MIX · analysing this song…";
+  }
+  el.classList.remove("hidden");
+}
+
+function setDjMode(on) {
+  djMode = on;
+  try { localStorage.setItem(DJ_KEY, on ? "1" : "0"); } catch {}
+  if (on && shuffleOn) { shuffleOn = false; nodes.npShuffle.classList.remove("active"); }
+  nodes.djToggle.classList.toggle("dj-on", on);
+  nodes.npDj.classList.toggle("active", on);
+  if (on) {
+    currentDjProfile = currentSongId ? usableProfile(djProfiles.get(currentSongId)) : null;
+    loadDjProfiles().then(() => {
+      if (currentSongId) currentDjProfile = usableProfile(djProfiles.get(currentSongId));
+      updateDjInfo(); renderNpQueue(); runDjAnalysisQueue();
+    });
+  } else {
+    currentDjProfile = null;
+  }
+  updateDjInfo();
+  renderNpQueue();
 }
 
 /* ══════════════ PLAYBACK + BACKGROUND AUDIO ══════════════ */
 function getPlaylist() {
   const list = sortSongs(filterSongs());
+  if (djMode && !shuffleOn) return djOrder(list);
   if (!shuffleOn) return list;
   const shuffled = [...list];
   for (let i = shuffled.length - 1; i > 0; i--) {
@@ -1140,7 +1551,17 @@ async function playSong(song, startTime = 0) {
   currentObjectUrl = URL.createObjectURL(blob);
   nodes.audio.src = currentObjectUrl;
   nodes.audio.load();
+  applyPlaybackSpeed();
   currentSongId = song.id;
+  // DJ Mix: skip a silent intro (sync, in-memory lookup: no extra await before play)
+  djAdvancedFor = null;
+  currentDjProfile = djMode ? usableProfile(djProfiles.get(song.id)) : null;
+  if (startTime === 0 && currentDjProfile && currentDjProfile.intro > 0.4) {
+    startTime = Math.max(0, currentDjProfile.intro - 0.15);
+    dbg(`dj: skipping ${startTime.toFixed(1)}s silent intro`);
+  }
+  updateDjInfo();
+  applyAlbumColor(song).catch(() => {});
   dbg(`playSong: ${song.id} startT=${startTime}`);
 
   // Optional resume position (used by recovery paths)
@@ -1323,7 +1744,7 @@ function resetAudioOutput() {
   const a = nodes.audio;
   try { if (a.muted) { a.muted = false; dbg("output: unmuted stuck element"); } } catch {}
   try { if (a.volume < 1) { a.volume = 1; dbg("output: restored volume"); } } catch {}
-  try { if (!a.playbackRate || a.playbackRate < 0.5) { a.playbackRate = 1; dbg("output: restored playbackRate"); } } catch {}
+  try { if (!a.playbackRate || a.playbackRate < 0.5) { a.playbackRate = playbackSpeed; dbg("output: restored playbackRate"); } } catch {}
 }
 
 /* PLAYBACK WATCHDOG — the "shows playing but no sound" killer.
@@ -1564,6 +1985,7 @@ function setPlayingState(playing) {
   nodes.miniPauseIcon.classList.toggle("hidden", !playing);
   nodes.npPlayIcon.classList.toggle("hidden", playing);
   nodes.npPauseIcon.classList.toggle("hidden", !playing);
+  syncFullPlayIcon();
   // Keep the OS lock-screen / notification controls in sync — but only WRITE when
   // the value actually changes. Re-writing the same playbackState makes iOS redraw
   // the now-playing card (flicker), and iOS re-dispatches pause when it sees churn.
@@ -1631,8 +2053,26 @@ nodes.audio.addEventListener("timeupdate", () => {
   nodes.npDuration.textContent = formatTime(duration);
   updatePositionState();
   updateLyricsHighlight();
+  updateFullProgress();
   schedulePlaybackSave();
+  maybeDjSkipOutro(currentTime);
 });
+
+// DJ Mix: move on as soon as the music ends instead of playing a silent tail.
+// Same code path as the lock-screen "next" button, so it is lock-screen safe.
+// Never fires on the last song (when nothing would follow) or in repeat-one.
+function maybeDjSkipOutro(t) {
+  if (!djMode || !currentDjProfile || !(currentDjProfile.outro > 0)) return;
+  if (repeatMode === "one" || djAdvancedFor === currentSongId || nodes.audio.paused) return;
+  if (t < currentDjProfile.outro) return;
+  if (!userQueue.length && repeatMode === "off") {
+    const list = getPlaylist();
+    if (list.findIndex((s) => s.id === currentSongId) === list.length - 1) return;
+  }
+  djAdvancedFor = currentSongId;
+  dbg(`dj: skipping ${(nodes.audio.duration - t).toFixed(1)}s silent outro`);
+  playNext(1);
+}
 
 // Save state when page is hidden/closed (handles iOS suspend & app close).
 // Mark wasSuspended so the next resume re-primes the (possibly route-decoupled)
@@ -1688,7 +2128,13 @@ nodes.audio.addEventListener("loadedmetadata", () => {
 
 // Player controls
 nodes.miniPlay.addEventListener("click", (e) => { e.stopPropagation(); togglePlayPause(); });
-nodes.miniContent.addEventListener("click", () => { if (currentSongId) { nodes.nowPlaying.classList.remove("hidden"); renderNpQueue(); } });
+nodes.miniContent.addEventListener("click", () => {
+  if (!currentSongId) return;
+  nodes.nowPlaying.classList.remove("hidden");
+  renderNpQueue();
+  // Card was measured while hidden — re-position the lyric glide now it's visible
+  requestAnimationFrame(() => updateLyricsHighlight(true));
+});
 nodes.npClose.addEventListener("click", () => nodes.nowPlaying.classList.add("hidden"));
 nodes.npPlay.addEventListener("click", togglePlayPause);
 nodes.npNext.addEventListener("click", () => playNext(1));
@@ -1699,6 +2145,7 @@ nodes.npSeek.addEventListener("input", () => { if (nodes.audio.duration) nodes.a
 nodes.npShuffle.addEventListener("click", () => {
   shuffleOn = !shuffleOn;
   nodes.npShuffle.classList.toggle("active", shuffleOn);
+  if (shuffleOn && djMode) setDjMode(false); // DJ Mix and shuffle are exclusive
   showToast(shuffleOn ? "Shuffle on" : "Shuffle off");
   renderNpQueue();
 });
@@ -1710,17 +2157,45 @@ nodes.npRepeat.addEventListener("click", () => {
   else { repeatMode = "off"; nodes.npRepeat.classList.remove("active"); nodes.repeatOneBadge.classList.add("hidden"); showToast("Repeat off"); }
 });
 
-/* ══════════════ LYRICS SHORTCUT ══════════════
-   Lyrics live in a card below the player (Spotify pattern — discovered by
-   scrolling, never forced). The top-bar button is just a shortcut to it. */
-nodes.npLyrics.addEventListener("click", () => {
-  if (nodes.lyricsCard && !nodes.lyricsCard.classList.contains("hidden")) {
-    try { nodes.lyricsCard.scrollIntoView({ behavior: "smooth", block: "start" }); }
-    catch { nodes.lyricsCard.scrollIntoView(); }
-  } else if (!navigator.onLine) {
-    showToast("No lyrics saved — play this song online once to fetch them");
-  } else {
-    showToast("No lyrics found for this song");
+/* ══════════════ LYRICS VIEWS ══════════════
+   The card below the player is the preview (discovered by scrolling, never
+   forced). Tapping it, "Show lyrics", or the top-bar button opens full screen. */
+nodes.npLyrics.addEventListener("click", openFullLyrics);
+nodes.lyricsCard.addEventListener("click", openFullLyrics);
+nodes.lfClose.addEventListener("click", closeFullLyrics);
+nodes.lfPlay.addEventListener("click", () => togglePlayPause());
+// Reading ahead pauses auto-follow for a few seconds
+["touchstart", "wheel"].forEach((ev) =>
+  nodes.lfScroll.addEventListener(ev, () => { lfUserScrollUntil = Date.now() + 4000; }, { passive: true }));
+
+// DJ analysis pauses while the app is hidden; resume when it comes back
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && djMode) setTimeout(() => runDjAnalysisQueue(), 1500);
+});
+
+/* ══════════════ SPEED + DJ CONTROLS ══════════════ */
+nodes.npSpeed.addEventListener("click", () => {
+  playbackSpeed = SPEEDS[(SPEEDS.indexOf(playbackSpeed) + 1) % SPEEDS.length];
+  try { localStorage.setItem(SPEED_KEY, String(playbackSpeed)); } catch {}
+  applyPlaybackSpeed();
+  updatePositionState(true);
+  showToast(`Speed ${playbackSpeed}×`);
+});
+nodes.npDj.addEventListener("click", () => {
+  setDjMode(!djMode);
+  showToast(djMode ? "DJ Mix on — smooth energy flow, no dead air" : "DJ Mix off");
+});
+nodes.djToggle.addEventListener("click", () => {
+  const turningOn = !djMode;
+  setDjMode(turningOn);
+  if (!turningOn) { showToast("DJ Mix off"); return; }
+  showToast("DJ Mix on — analysing songs on your phone (works offline)");
+  // Start the mix from the warm-up end of the curve if nothing is playing.
+  // Synchronous within the tap (profiles are preloaded at startup) so iOS
+  // keeps the user-gesture permission to start audio.
+  if (nodes.audio.paused) {
+    const list = getPlaylist();
+    if (list.length) playSong(list[0]);
   }
 });
 
@@ -1826,6 +2301,7 @@ async function removeSong(id) {
   await deleteBlob(id);
   await deleteArtwork(id);
   await deleteLyrics(id);
+  await deleteDjProfile(id);
   if (artCache.has(id)) { URL.revokeObjectURL(artCache.get(id)); artCache.delete(id); }
   // If we deleted the currently-restored song, clear playback state
   if (currentSongId === id) {
@@ -2270,6 +2746,63 @@ nodes.exportBackup.addEventListener("click", async () => { try { await exportBac
 nodes.importBackupFile.addEventListener("change", async (e) => { const f = e.target.files?.[0]; if (!f) return; try { await importBackup(f); showToast("Imported"); } catch { showToast("Import failed"); } finally { nodes.importBackupFile.value = ""; } });
 nodes.exportLibrary.addEventListener("click", async () => { try { await exportLibrary(); } catch { showToast("Export failed"); } });
 nodes.importLibraryFile.addEventListener("change", async (e) => { const f = e.target.files?.[0]; if (!f) return; try { await importLibrary(f); } catch { showToast("Import failed"); } finally { nodes.importLibraryFile.value = ""; } });
+
+/* ══════════════ IMPORT A SONG LIST ══════════════
+   Paste a list (from Spotify, WhatsApp, anywhere) → each line is matched on
+   JioSaavn and queued for offline download, optionally into a playlist. */
+function addToPlaylistById(id, pl) {
+  const s = songs.find((x) => x.id === id);
+  if (!s || !pl) return;
+  if (!playlists.includes(pl)) { playlists.push(pl); playlistOrders[pl] = []; }
+  if (!s.playlists.includes(pl)) { s.playlists.push(pl); playlistOrders[pl] = [...(playlistOrders[pl] || []), id]; }
+  saveMeta(); render();
+}
+let importListBusy = false;
+nodes.importListForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (importListBusy) return;
+  if (!navigator.onLine) { showToast("Importing needs internet — your library still works offline"); return; }
+  const seen = new Set();
+  const lines = nodes.importListText.value.split("\n")
+    .map((l) => l.replace(/^\s*\d+[.)]\s*/, "").replace(/\s+/g, " ").trim()) // drop "1." numbering
+    .filter((l) => l && !seen.has(l.toLowerCase()) && seen.add(l.toLowerCase()))
+    .slice(0, 60);
+  if (!lines.length) { showToast("Paste at least one song"); return; }
+  let pl = nodes.importListPlaylist.value.replace(/\s+/g, " ").trim();
+  if (pl) {
+    const existing = playlists.find((p) => slugify(p) === slugify(pl));
+    if (existing) pl = existing; // reuse instead of creating a near-duplicate
+    else { playlists.push(pl); playlistOrders[pl] = []; saveMeta(); render(); }
+  }
+  importListBusy = true;
+  const status = nodes.importListStatus;
+  let queued = 0, already = 0;
+  const missing = [];
+  try {
+    for (let i = 0; i < lines.length; i++) {
+      status.textContent = `Finding ${i + 1}/${lines.length}: ${lines[i]}`;
+      let results = [];
+      try { results = await fetchJioSaavnCandidates(lines[i].replace(/\s[-–—]\s/g, " "), 1); } catch {}
+      const best = results[0];
+      if (!best) { missing.push(lines[i]); continue; }
+      const have = songs.find((s) => (best.saavnId && s.saavnId === best.saavnId) ||
+        (s.title.toLowerCase() === best.title.toLowerCase() && (s.artist || "").toLowerCase() === (best.artist || "").toLowerCase()));
+      if (have) { if (pl) addToPlaylistById(have.id, pl); already++; continue; }
+      best.query = lines[i];
+      best.importPlaylist = pl;
+      enqueueDownload(best);
+      queued++;
+      await new Promise((r) => setTimeout(r, 350)); // be polite to the mirrors
+    }
+  } finally {
+    importListBusy = false;
+  }
+  status.textContent = `Downloading ${queued} song${queued !== 1 ? "s" : ""}` +
+    (already ? ` · ${already} already in your library` : "") +
+    (missing.length ? ` · not found: ${missing.join(", ")}` : "");
+  if (queued) nodes.importListText.value = "";
+  showToast(queued ? `Downloading ${queued} song${queued !== 1 ? "s" : ""} for offline` : "Nothing new to download");
+});
 if (nodes.syncNowBtn) nodes.syncNowBtn.addEventListener("click", async () => { if (!SYNC.uid) { showToast("Sign in first"); return; } showToast("Syncing…"); await pullAndMerge(); await firestorePush(); showToast("Sync complete"); });
 if (nodes.signOutBtn) nodes.signOutBtn.addEventListener("click", () => { signOutCloud(); showToast("Signed out"); });
 // Resume a debounced push if we come back online while signed in.
@@ -2390,10 +2923,13 @@ registerMediaHandlers();
 
 // Then load local artwork from IndexedDB and re-render with offline-safe URLs
 (async function init() {
+  applyPlaybackSpeed();
   await loadAllArtwork();
   render(); // Re-render with cached artwork
   // Restore the last playing song so it never "disappears" after iOS suspends the page
   await restorePlaybackState();
+  // DJ profiles are tiny; preload so DJ Mix can start instantly inside a tap
+  loadDjProfiles().then(() => { if (djMode) setDjMode(true); });
   updateStorageInfo();
   checkPwaBanner();
   requestPersistence();

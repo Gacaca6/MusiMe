@@ -380,6 +380,13 @@ select {
   font-size: 0.9rem; font-family: inherit; outline: none;
 }
 .settings-form input:focus { border-color: var(--accent); }
+.settings-form textarea {
+  width: 100%; padding: 0.7rem 0.8rem; resize: vertical; min-height: 6rem;
+  border: 1px solid var(--surface-3); border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--text);
+  font-size: 0.9rem; font-family: inherit; line-height: 1.5; outline: none;
+}
+.settings-form textarea:focus { border-color: var(--accent); }
 .file-drop {
   display: block; border: 2px dashed var(--surface-3);
   border-radius: var(--radius); padding: 1.2rem;
@@ -427,7 +434,8 @@ select {
 /* ═══════════════ NOW PLAYING ═══════════════ */
 .now-playing {
   position: fixed; inset: 0; z-index: 200;
-  background: var(--bg);
+  /* --np-color is set from the cached artwork (offline) per song */
+  background: linear-gradient(180deg, var(--np-color, #1f1a3d) 0%, var(--bg) 65%), var(--bg);
   display: flex; flex-direction: column;
   align-items: center;
   padding: max(var(--safe-top), 0.5rem) 1.5rem max(env(safe-area-inset-bottom), 1rem);
@@ -462,6 +470,13 @@ select {
 }
 .np-top-btn svg { width: 22px; height: 22px; }
 .np-top-btn.active { color: var(--accent); }
+.np-top-right { display: flex; align-items: center; gap: 0.1rem; }
+.np-speed { font-size: 0.82rem; font-weight: 700; min-width: 2.6rem; font-family: inherit; }
+.np-speed.active { color: var(--text); }
+.np-dj-info {
+  margin-top: 0.35rem; font-size: 0.72rem; letter-spacing: 0.06em;
+  color: var(--accent-2); font-weight: 600;
+}
 
 /* Sleep Timer */
 .sleep-indicator {
@@ -701,48 +716,102 @@ select {
 .splash-credit { margin-top: 0.5rem; font-size: 0.78rem; letter-spacing: 0.14em; color: var(--accent); font-weight: 600; }
 
 /* ═══════════════ LYRICS (Spotify-style card, scroll down to see) ═══════════════ */
+/* --lyr-color is the album color, lifted so black + white text both read on it */
 .lyrics-card {
   width: 100%;
-  max-width: 320px;
+  max-width: 340px;
   flex-shrink: 0;
-  margin: 1.1rem 0 1rem;
-  padding: 1rem 1.15rem 1.15rem;
-  border-radius: var(--radius);
-  background: linear-gradient(160deg, var(--accent) 0%, #4534a8 100%);
-}
-.lyrics-card-title {
-  font-size: 0.74rem;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: rgba(255,255,255,0.75);
-  margin: 0 0 0.55rem;
-}
-.lyrics-scroll {
-  position: relative;
-  max-height: 280px;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-}
-.lyric-line {
-  font-size: 1.08rem;
-  font-weight: 700;
-  line-height: 1.55;
-  margin: 0.5rem 0;
-  text-align: left;
-  color: rgba(255,255,255,0.55);
-  transition: color 0.2s ease;
+  margin: 1.2rem 0 1rem;
+  padding: 1rem 1.1rem 0.9rem;
+  border-radius: 16px;
+  background: linear-gradient(165deg, rgba(255,255,255,0.10), rgba(0,0,0,0.18)), var(--lyr-color, #5a48c8);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.35);
   cursor: pointer;
 }
+.lyrics-card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.6rem; }
+.lyrics-card-title { font-size: 1rem; font-weight: 800; color: #fff; margin: 0; }
+.lyrics-offline-badge {
+  font-size: 0.66rem; font-weight: 600; color: rgba(255,255,255,0.9);
+  background: rgba(0,0,0,0.22); padding: 0.2rem 0.55rem; border-radius: 999px;
+}
+/* Preview window: not scrollable — the lines glide to follow the song */
+.lyrics-window {
+  position: relative;
+  height: 10.5rem;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 12%, #000 80%, transparent 100%);
+  mask-image: linear-gradient(180deg, transparent 0, #000 12%, #000 80%, transparent 100%);
+}
+.lyrics-glide { transition: transform 0.45s cubic-bezier(.2,.7,.2,1); will-change: transform; }
+.lyric-line {
+  font-size: 1.3rem;
+  font-weight: 800;
+  line-height: 1.28;
+  margin: 0 0 0.55rem;
+  text-align: left;
+  color: rgba(0,0,0,0.52);
+  transition: color 0.25s ease;
+  overflow-wrap: anywhere;
+}
+.lyric-line.past { color: rgba(255,255,255,0.7); }
 .lyric-line.active { color: #ffffff; }
 .lyrics-plain {
   white-space: pre-wrap;
-  font-size: 1rem;
-  font-weight: 600;
-  line-height: 1.65;
+  font-size: 1.15rem;
+  font-weight: 700;
+  line-height: 1.45;
   color: #ffffff;
   text-align: left;
+  overflow-wrap: anywhere;
 }
+.lyrics-card-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 0.7rem; }
+.lyrics-show-btn {
+  background: #fff; color: #000; border: none; border-radius: 999px;
+  padding: 0.5rem 1.05rem; font-size: 0.85rem; font-weight: 700;
+  font-family: inherit; cursor: pointer;
+}
+.lyrics-source { font-size: 0.66rem; color: rgba(255,255,255,0.7); }
+
+/* Full-screen lyrics view */
+.lyrics-full {
+  position: fixed; inset: 0; z-index: 260;
+  display: flex; flex-direction: column;
+  background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(0,0,0,0.25)), var(--lyr-color, #5a48c8);
+  padding: max(var(--safe-top), 0.5rem) 0 max(env(safe-area-inset-bottom), 0.8rem);
+  animation: slideUp 260ms ease-out;
+}
+.lyrics-full.hidden { display: none; }
+.lyrics-full .np-close { color: #fff; }
+.lf-top { display: flex; align-items: center; padding: 0 0.6rem; flex-shrink: 0; }
+.lf-meta { flex: 1; text-align: center; min-width: 0; }
+.lf-title, .lf-artist { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lf-title { font-weight: 700; font-size: 0.95rem; color: #fff; }
+.lf-artist { font-size: 0.8rem; color: rgba(255,255,255,0.78); margin-top: 0.1rem; }
+.lf-spacer { width: 44px; flex-shrink: 0; }
+.lf-scroll {
+  position: relative;
+  flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  padding: 1.6rem 1.5rem 40vh;
+  /* lines fade softly under the header and above the controls */
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 7%, #000 90%, transparent 100%);
+  mask-image: linear-gradient(180deg, transparent 0, #000 7%, #000 90%, transparent 100%);
+}
+.lf-scroll .lyric-line { font-size: 1.7rem; line-height: 1.25; margin: 0 0 1.05rem; cursor: pointer; }
+.lf-scroll .lyrics-plain { font-size: 1.35rem; line-height: 1.5; }
+.lf-attrib { font-size: 0.72rem; color: rgba(255,255,255,0.65); margin-top: 1.6rem; }
+.lf-bottom { flex-shrink: 0; padding: 0.6rem 1.5rem 0; }
+.lf-progress { height: 4px; background: rgba(255,255,255,0.25); border-radius: 2px; overflow: hidden; }
+.lf-progress-fill { height: 100%; width: 0; background: #fff; }
+.lf-row { display: flex; justify-content: space-between; align-items: center; margin-top: 0.55rem; }
+.lf-time { font-size: 0.75rem; color: rgba(255,255,255,0.85); min-width: 2.6rem; }
+.lf-time:last-child { text-align: right; }
+.lf-play {
+  width: 56px; height: 56px; border-radius: 50%; border: none;
+  background: #fff; color: #000; display: grid; place-items: center; cursor: pointer;
+}
+.lf-play svg { width: 26px; height: 26px; }
+
+.pill-btn.dj-on { background: var(--accent); border-color: var(--accent); color: #fff; }
 
 /* ═══════════════ LOAD MORE ═══════════════ */
 .load-more-btn { display: block; margin: 0.9rem auto 0.4rem; max-width: 240px; }

@@ -55,6 +55,9 @@
         <header class="view-header">
           <h1>Library</h1>
           <div class="header-actions">
+            <button id="dj-toggle" class="pill-btn" type="button" title="DJ Mix: smooth energy flow, no dead air">
+              <span aria-hidden="true">&#127911;</span> DJ Mix
+            </button>
             <button id="favorites-toggle" class="pill-btn" type="button">
               <span class="fav-icon">&#9825;</span> Favorites
             </button>
@@ -160,6 +163,16 @@
           </div>
         </section>
         <section class="settings-section">
+          <h3>Import a Song List</h3>
+          <p class="hint" style="margin-bottom:0.6rem">Paste songs, one per line (e.g. <em>Israel Mbonyi - Nina Siri</em>). Copy a list from Spotify, WhatsApp, anywhere. MusiMe finds each song and downloads it for offline.</p>
+          <form id="import-list-form" class="settings-form" action="javascript:void(0)">
+            <textarea id="import-list-text" rows="5" placeholder="Artist - Song title&#10;Artist - Song title"></textarea>
+            <input id="import-list-playlist" type="text" placeholder="Save into playlist (optional)" />
+            <button class="pill-btn accent wide" type="submit">Find &amp; Download</button>
+          </form>
+          <p id="import-list-status" class="hint" style="margin-top:0.5rem"></p>
+        </section>
+        <section class="settings-section">
           <h3>Backup &amp; Restore</h3>
           <p class="hint" style="margin-bottom:0.6rem">Full backup includes the audio files (large). Use this to move everything to another device without re-downloading.</p>
           <div class="backup-row">
@@ -199,14 +212,22 @@
         <button id="np-close" class="np-close" type="button">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
         </button>
-        <!-- Lyrics toggle -->
-        <button id="np-lyrics" class="np-top-btn" type="button" title="Lyrics">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h10M4 18h7"/></svg>
-        </button>
-        <!-- Sleep Timer -->
-        <button id="np-sleep" class="np-top-btn" type="button" title="Sleep timer">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
-        </button>
+        <div class="np-top-right">
+          <!-- Playback speed -->
+          <button id="np-speed" class="np-top-btn np-speed" type="button" title="Playback speed">1&times;</button>
+          <!-- DJ Mix -->
+          <button id="np-dj" class="np-top-btn" type="button" title="DJ Mix">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 14v-2a9 9 0 0 1 18 0v2"/><rect x="2" y="14" width="5" height="7" rx="1.5"/><rect x="17" y="14" width="5" height="7" rx="1.5"/></svg>
+          </button>
+          <!-- Lyrics (opens full-screen lyrics) -->
+          <button id="np-lyrics" class="np-top-btn" type="button" title="Lyrics">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h10M4 18h7"/></svg>
+          </button>
+          <!-- Sleep Timer -->
+          <button id="np-sleep" class="np-top-btn" type="button" title="Sleep timer">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          </button>
+        </div>
       </div>
       <!-- Sleep Timer Indicator -->
       <div id="sleep-indicator" class="sleep-indicator hidden">
@@ -228,6 +249,7 @@
       <div class="np-info">
         <p id="np-title" class="np-title">No song selected</p>
         <p id="np-artist" class="np-artist">Choose a track</p>
+        <p id="np-dj-info" class="np-dj-info hidden"></p>
       </div>
       <div class="np-progress">
         <input id="np-seek" type="range" min="0" max="100" value="0" step="0.1" class="seek-bar" />
@@ -257,8 +279,15 @@
       </div>
       <!-- Lyrics card (Spotify-style: scroll down to see it; hidden when no lyrics) -->
       <section id="lyrics-card" class="lyrics-card hidden">
-        <h3 class="lyrics-card-title">Lyrics</h3>
-        <div id="lyrics-panel" class="lyrics-scroll"></div>
+        <div class="lyrics-card-head">
+          <h3 class="lyrics-card-title">Lyrics</h3>
+          <span class="lyrics-offline-badge">&#10003; Saved offline</span>
+        </div>
+        <div id="lyrics-panel" class="lyrics-window"></div>
+        <div class="lyrics-card-foot">
+          <button id="lyrics-show-full" class="lyrics-show-btn" type="button">Show lyrics</button>
+          <span id="lyrics-source" class="lyrics-source"></span>
+        </div>
       </section>
       <!-- Up Next / Queue -->
       <div class="np-queue-section">
@@ -306,6 +335,32 @@
         <span>More</span>
       </button>
     </nav>
+
+    <!-- Full-screen lyrics (Spotify-style "Show lyrics" view) -->
+    <div id="lyrics-full" class="lyrics-full hidden" role="dialog" aria-label="Lyrics">
+      <div class="lf-top">
+        <button id="lf-close" class="np-close" type="button" aria-label="Close lyrics">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <div class="lf-meta">
+          <p id="lf-title" class="lf-title"></p>
+          <p id="lf-artist" class="lf-artist"></p>
+        </div>
+        <span class="lf-spacer"></span>
+      </div>
+      <div id="lf-scroll" class="lf-scroll"></div>
+      <div class="lf-bottom">
+        <div class="lf-progress"><div id="lf-progress-fill" class="lf-progress-fill"></div></div>
+        <div class="lf-row">
+          <span id="lf-current" class="lf-time">0:00</span>
+          <button id="lf-play" class="lf-play" type="button" aria-label="Play or pause">
+            <svg id="lf-play-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+            <svg id="lf-pause-icon" class="hidden" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6zm8-14v14h4V5z"/></svg>
+          </button>
+          <span id="lf-duration" class="lf-time">0:00</span>
+        </div>
+      </div>
+    </div>
 
     <!-- Add-to-playlist bottom sheet (prompt() is ignored in iOS standalone PWAs) -->
     <div id="playlist-sheet" class="sheet-backdrop hidden">
