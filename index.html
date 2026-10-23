@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1" />
-    <meta name="theme-color" content="#0a0a0f" />
+    <meta name="theme-color" content="#222222" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="MusiMe" />
@@ -13,10 +13,7 @@
     <!-- iOS home-screen icon MUST be PNG — SVG apple-touch-icons never load -->
     <link rel="apple-touch-icon" href="icons/icon-180.png" />
     <title>MusiMe</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="styles.css?v=2026.10.23.1" />
   </head>
   <body>
 
@@ -31,29 +28,40 @@
     <!-- App Shell -->
     <div class="app-shell">
 
-      <!-- Discover -->
-      <div id="view-search" class="view active">
-        <header class="view-header">
-          <h1>Discover</h1>
-          <button id="install-btn" class="pill-btn hidden" type="button">Install</button>
-        </header>
-        <form id="search-form" class="search-bar" action="javascript:void(0)">
-          <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-          <input id="search-query" type="search" placeholder="Search songs, artists..." required />
-        </form>
-        <div id="download-queue" class="download-queue hidden"></div>
-        <div id="search-results" class="search-results">
-          <div class="empty-state">
-            <div class="empty-icon">&#9835;</div>
-            <p>Search for any song or artist</p>
+      <div id="view-home" class="view home-view active">
+        <header class="home-header">
+          <div class="home-identity">
+            <img class="home-avatar" src="icons/icon-192.svg" alt="MusiMe" />
+            <div><p id="home-greeting" class="home-greeting">Welcome back,</p><h1>your music.</h1></div>
           </div>
+          <div class="home-utilities">
+            <button type="button" class="home-icon" data-open-view="view-settings" aria-label="Settings"><svg viewBox="0 0 24 24"><path d="m9 3-1 3-3 1-2 5 2 5 3 1 1 3h6l1-3 3-1 2-5-2-5-3-1-1-3Z"/><circle cx="12" cy="12" r="3"/></svg></button>
+          </div>
+        </header>
+        <div class="home-actions">
+          <button id="home-shuffle" type="button"><svg viewBox="0 0 24 24"><path d="m3 4 18 16m-5 0h5v-5M3 20l6-6m6-6 6-4m-5 0h5v5"/></svg>Shuffle all</button>
+          <button id="home-create-playlist" type="button"><svg viewBox="0 0 24 24"><path d="M12 4v16M4 12h16"/></svg>Create Playlist</button>
         </div>
-      </div>
-
-      <!-- Library -->
-      <div id="view-library" class="view">
-        <header class="view-header">
-          <h1>Library</h1>
+        <div id="lib-mode" class="home-filters" role="group" aria-label="Browse downloaded music">
+          <button type="button" class="seg-btn active" data-mode="all" aria-pressed="true">All</button>
+          <button type="button" class="seg-btn" data-mode="songs">Songs</button>
+          <button type="button" class="seg-btn" data-mode="albums">Albums</button>
+          <button type="button" class="seg-btn" data-mode="artists">Artists</button>
+        </div>
+        <section id="home-recent-section" class="home-section" aria-labelledby="home-recent-heading">
+          <div class="home-section-heading"><h2 id="home-recent-heading">Recently Added</h2><button type="button" class="home-more" data-home-collection="songs" aria-label="See all downloaded songs">&#8250;</button></div>
+          <div id="home-recent" class="home-recent"></div>
+        </section>
+        <section id="home-albums-section" class="home-section" aria-labelledby="home-albums-heading">
+          <div class="home-section-heading"><h2 id="home-albums-heading">Recently added albums</h2><button type="button" class="home-more" data-home-collection="albums" aria-label="See all downloaded albums">&#8250;</button></div>
+          <div id="home-albums" class="home-albums"></div>
+        </section>
+      <section id="home-music" class="home-music" aria-labelledby="home-music-heading">
+        <header class="home-music-heading">
+          <h2 id="home-music-heading">Downloaded songs</h2>
+          <button id="home-options-toggle" class="pill-btn" type="button" aria-expanded="false" aria-controls="home-options">Options</button>
+        </header>
+        <div id="home-options" class="home-options hidden">
           <div class="header-actions">
             <button id="dj-toggle" class="pill-btn" type="button" title="DJ Mix: smooth energy flow, no dead air">
               <span aria-hidden="true">&#127911;</span> DJ Mix
@@ -62,11 +70,10 @@
               <span class="fav-icon">&#9825;</span> Favorites
             </button>
           </div>
-        </header>
-        <div class="library-tools">
+          <div class="library-tools">
           <div class="search-bar small">
             <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-            <input id="search-input" type="search" placeholder="Filter library..." />
+            <input id="search-input" type="search" placeholder="Filter your music..." />
           </div>
           <select id="sort-select">
             <option value="newest">Newest</option>
@@ -77,17 +84,54 @@
             <option value="playlist">Playlist</option>
           </select>
         </div>
+        </div>
+        <div id="lib-collection" class="lib-collection hidden"></div>
+        <div id="lib-songs-wrap">
         <!-- Shows which playlist the library is filtered to -->
         <div id="active-playlist-chip" class="playlist-chip hidden">
           <span id="active-playlist-name"></span>
           <button id="clear-playlist-filter" type="button" aria-label="Show all songs">&#10005;</button>
         </div>
+        <!-- Shows which album/artist the library is filtered to -->
+        <div id="collection-chip" class="playlist-chip hidden">
+          <span id="collection-chip-name"></span>
+          <button id="clear-collection-filter" type="button" aria-label="Show all songs">&#10005;</button>
+        </div>
+        <details class="home-history"><summary>Listening history</summary>
         <!-- Recently Played Section -->
         <div id="recently-played-section" class="recently-played-section hidden">
           <h3 class="section-label">Recently Played</h3>
           <div id="recently-played" class="recently-played-scroll"></div>
         </div>
+        </details>
         <div id="songs" class="songs"></div>
+        </div><!-- /lib-songs-wrap -->
+      </section>
+
+        <p id="home-library-note" class="home-library-note"></p>
+      </div>
+
+      <!-- Search -->
+      <div id="view-search" class="view">
+        <header class="view-header">
+          <h1>Search</h1>
+          <button id="install-btn" class="pill-btn hidden" type="button">Install</button>
+        </header>
+        <form id="search-form" class="search-bar" action="javascript:void(0)">
+          <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+          <input id="search-query" type="search" placeholder="Search songs, artists..." required />
+        </form>
+        <div id="search-mode" class="seg" role="tablist">
+          <button type="button" class="seg-btn active" data-mode="songs">Songs</button>
+          <button type="button" class="seg-btn" data-mode="albums">Albums</button>
+        </div>
+        <div id="download-queue" class="download-queue hidden"></div>
+        <div id="search-results" class="search-results">
+          <div class="empty-state">
+            <div class="empty-icon">&#9835;</div>
+            <p>Search for any song or artist</p>
+          </div>
+        </div>
       </div>
 
       <!-- Playlists -->
@@ -115,6 +159,15 @@
         <header class="view-header">
           <h1>Settings</h1>
         </header>
+        <section class="settings-section">
+          <h3>Download Quality</h3>
+          <p class="hint" style="margin-bottom:0.6rem">Lower quality = less internet data used. Songs you already downloaded stay as they are.</p>
+          <div id="quality-options" class="quality-options">
+            <button type="button" class="quality-opt" data-q="96kbps"><strong>Data Saver</strong><span>&asymp; 2.8 MB per song</span></button>
+            <button type="button" class="quality-opt" data-q="160kbps"><strong>Normal</strong><span>&asymp; 4.7 MB per song</span></button>
+            <button type="button" class="quality-opt" data-q="320kbps"><strong>High</strong><span>&asymp; 9.4 MB per song</span></button>
+          </div>
+        </section>
         <section class="settings-section">
           <h3>Add from URL</h3>
           <form id="url-form" class="settings-form" action="javascript:void(0)">
@@ -309,30 +362,23 @@
           <p id="mini-title" class="mini-title">No song</p>
           <p id="mini-artist" class="mini-artist">-</p>
         </div>
-        <button id="mini-play" class="mini-play-btn" type="button">
+        <div class="mini-controls"><button id="mini-prev" class="mini-play-btn" type="button" aria-label="Previous song"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M5 5h3v14H5zm14 0v14L9 12z"/></svg></button>
+        <button id="mini-play" aria-label="Play or pause" class="mini-play-btn" type="button">
           <svg id="mini-play-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
           <svg id="mini-pause-icon" class="hidden" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6zm8-14v14h4V5z"/></svg>
-        </button>
+        </button><button id="mini-next" class="mini-play-btn" type="button" aria-label="Next song"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h3v14h-3zM5 5l10 7-10 7z"/></svg></button></div>
       </div>
     </div>
 
-    <!-- Tab Bar -->
-    <nav class="tab-bar">
-      <button class="tab active" data-view="view-search" type="button">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-        <span>Discover</span>
+    <nav class="tab-bar" aria-label="Main navigation">
+      <button class="tab active" data-view="view-home" type="button" aria-current="page">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="m12 2 10 8-2 2-1-1v10h-5v-7h-4v7H5V11l-1 1-2-2Z"/></svg><span>Home</span>
       </button>
-      <button class="tab" data-view="view-library" type="button">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
-        <span>Library</span>
+      <button class="tab" data-view="view-search" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></svg><span>Search</span>
       </button>
       <button class="tab" data-view="view-playlists" type="button">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15V6m-7.5-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-3.5"/><path d="M3 10h18"/></svg>
-        <span>Playlists</span>
-      </button>
-      <button class="tab" data-view="view-settings" type="button">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-        <span>More</span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 5h16M4 10h16M4 15h8m5-1v8m-4-4h8"/></svg><span>Playlists</span>
       </button>
     </nav>
 
@@ -362,6 +408,52 @@
       </div>
     </div>
 
+    <!-- Album / artist page (Discover albums + Library albums/artists) -->
+    <div id="album-page" class="album-page hidden" role="dialog" aria-label="Album">
+      <div class="ap-top">
+        <button id="ap-back" class="np-close" type="button" aria-label="Back">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m15 18-6-6 6-6"/></svg>
+        </button>
+      </div>
+      <div class="ap-hero">
+        <img id="ap-cover" class="ap-cover" src="" alt="" />
+        <div id="ap-cover-ph" class="ap-cover placeholder hidden"><span>&#9835;</span></div>
+        <h2 id="ap-title" class="ap-title"></h2>
+        <p id="ap-sub" class="ap-sub"></p>
+        <p id="ap-meta" class="ap-meta"></p>
+        <div id="ap-actions" class="ap-actions"></div>
+      </div>
+      <div id="ap-extra" class="ap-extra"></div>
+      <div id="ap-tracks" class="ap-tracks"></div>
+    </div>
+
+    <div id="song-actions-sheet" class="sheet-backdrop hidden">
+      <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="song-actions-title">
+        <h3 id="song-actions-title" class="sheet-title"></h3>
+        <p id="song-actions-artist" class="hint sheet-song"></p>
+        <div id="song-actions-list" class="song-actions-list"></div>
+        <button id="song-actions-close" class="pill-btn wide" type="button">Done</button>
+      </div>
+    </div>
+
+    <!-- Edit song info sheet -->
+    <div id="edit-sheet" class="sheet-backdrop hidden">
+      <div class="sheet" role="dialog" aria-label="Edit song info">
+        <h3 class="sheet-title">Edit song info</h3>
+        <p class="hint sheet-song">Fix a wrong title, artist or album. Saved on your phone.</p>
+        <form id="edit-form" class="settings-form" action="javascript:void(0)">
+          <label class="edit-label">Title<input id="edit-title" type="text" required /></label>
+          <label class="edit-label">Artist<input id="edit-artist" type="text" /></label>
+          <label class="edit-label">Album<input id="edit-album" type="text" /></label>
+          <label class="edit-label">Track number<input id="edit-track" type="number" min="0" max="999" inputmode="numeric" /></label>
+          <div class="backup-row">
+            <button id="edit-cancel" class="pill-btn wide" type="button">Cancel</button>
+            <button class="pill-btn accent wide" type="submit">Save</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
     <!-- Add-to-playlist bottom sheet (prompt() is ignored in iOS standalone PWAs) -->
     <div id="playlist-sheet" class="sheet-backdrop hidden">
       <div class="sheet" role="dialog" aria-label="Add to playlist">
@@ -376,9 +468,13 @@
       </div>
     </div>
 
+    <aside id="app-update-banner" class="app-update-banner hidden" role="status">
+      <p id="app-update-text"></p>
+      <button id="apply-app-update" class="pill-btn accent" type="button">Update now</button>
+    </aside>
     <audio id="audio" preload="metadata"></audio>
     <aside id="toast" class="toast" role="status" aria-live="polite"></aside>
 
-    <script src="app.js" type="module"></script>
+    <script src="app.js?v=2026.10.23.1" type="module"></script>
   </body>
 </html>
