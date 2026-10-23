@@ -8,7 +8,7 @@ const pw = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root = path.resolve(__dirname, '..');
 const output = path.resolve(process.env.TEST_OUTPUT_DIR || path.join(root, 'test-results'));
 fs.mkdirSync(output, { recursive: true });
-const build = '2026.10.23.1';
+const build = '2026.10.23.2';
 const results = [];
 const browserResourceDiagnostics = [];
 let activeScenario = "";
@@ -369,11 +369,11 @@ async function runUpgrades() {
       await page.waitForFunction(() => !!document.getElementById('view-home'), { timeout: 20000 });
       await page.waitForTimeout(500);
       assert.deepEqual(await storageSnapshot(page), before);
-      await page.waitForFunction(() => new Promise((resolve) => {
+      await page.waitForFunction((expected) => new Promise((resolve) => {
         const timer = setTimeout(() => resolve(false), 300);
-        const listener = (event) => { if (event.data?.type === "MUSIME_VERSION") { clearTimeout(timer); navigator.serviceWorker.removeEventListener("message", listener); resolve(event.data.version === "2026.10.23.1"); } };
+        const listener = (event) => { if (event.data?.type === "MUSIME_VERSION") { clearTimeout(timer); navigator.serviceWorker.removeEventListener("message", listener); resolve(event.data.version === expected); } };
         navigator.serviceWorker.addEventListener("message", listener); navigator.serviceWorker.controller?.postMessage({ type: "GET_VERSION" });
-      }));
+      }), build);
       await page.close();
       await context.setOffline(true);
       const offlinePage = await context.newPage();
@@ -395,7 +395,10 @@ async function runUpgrades() {
       await context.setOffline(true); await page.reload(); await page.waitForTimeout(500);
       assert.equal(await page.locator('script[src*="app.js"]').getAttribute('src'), `app.js?v=${build}`);
       assert.deepEqual(await storageSnapshot(page), before);
-      await context.setOffline(false); failedAsset = ''; version = '2026.10.23.2';
+      // Simulated future releases are derived from the current build so they
+      // always differ from it, whatever the real version number is.
+      const nextRelease = `${build}-next1`, laterRelease = `${build}-next2`;
+      await context.setOffline(false); failedAsset = ''; version = nextRelease;
       await clickMode(page, 'songs'); await page.locator('.song-main').first().click(); await page.waitForFunction(() => !document.getElementById('audio').paused);
       await page.evaluate(async () => { const r = await navigator.serviceWorker.getRegistration(); await r.update(); });
       await page.locator('#app-update-banner').waitFor({ state: 'visible', timeout: 20000 });
@@ -403,12 +406,12 @@ async function runUpgrades() {
       assert.equal(await page.locator('#audio').evaluate((a) => a.paused), false);
       await page.locator('#mini-play').click(); assert.equal(await page.locator('#apply-app-update').isEnabled(), true);
       await page.locator('#apply-app-update').click();
-      await page.waitForFunction(() => document.querySelector('script[src*="app.js"]').getAttribute('src').includes('2026.10.23.2'));
+      await page.waitForFunction((v) => document.querySelector('script[src*="app.js"]').getAttribute('src').includes(v), nextRelease);
       assert.equal(await page.evaluate(() => caches.has('another-app-cache')), true);
-      version = '2026.10.23.3';
+      version = laterRelease;
       await page.evaluate(async () => { const r = await navigator.serviceWorker.getRegistration(); await r.update(); });
       await page.locator('#app-update-banner').waitFor({ state: 'visible', timeout: 20000 }); await page.locator('#apply-app-update').click();
-      await page.waitForFunction(() => document.querySelector('script[src*="app.js"]').getAttribute('src').includes('2026.10.23.3'));
+      await page.waitForFunction((v) => document.querySelector('script[src*="app.js"]').getAttribute('src').includes(v), laterRelease);
       assert.deepEqual((await storageSnapshot(page)).bytes, before.bytes);
       await noErrors(errors);
     } finally { await context.close(); version = build; failedAsset = ''; }
