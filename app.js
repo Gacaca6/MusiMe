@@ -1,4 +1,4 @@
-const APP_VERSION = "2026.10.23.2";
+const APP_VERSION = "2026.10.23.3";
 const DB_NAME = "musime-db";
 const STORE_NAME = "songs";
 const SONGS_KEY = "musime-songs-meta";
@@ -1043,7 +1043,7 @@ async function processQueue() {
           next.progress = 10; renderQueue();
           blob = await fetchAudioBlob(downloadUrlFor(next.result), (p) => { next.progress = p; renderQueue(); });
         }
-        const songId = await addSong({ title: next.result.title, artist: next.result.artist, source: next.result.source, blob, album: next.result.album || "", artwork: next.result.artwork || "", duration: next.result.duration || 0, saavnId: next.result.saavnId || "", query: next.result.query || "", albumId: next.result.albumId || "", track: next.result.track || 0, year: next.result.year || "" });
+        const songId = await addSong({ title: next.result.title, artist: next.result.artist, source: next.result.source, blob, album: next.result.album || "", artwork: next.result.artwork || "", duration: next.result.duration || 0, saavnId: next.result.saavnId || "", query: next.result.query || "", albumId: next.result.albumId || "", track: next.result.track || 0, year: next.result.year || "", downloadedAsAlbum: next.result.downloadedAsAlbum === true });
         // Cache artwork locally for offline use
         if (next.result.artwork && songId) {
           await cacheArtworkFromUrl(songId, next.result.artwork);
@@ -2673,11 +2673,12 @@ async function removeSong(id) {
   }
   saveMeta(); render(); showToast("Removed");
 }
-async function addSong({ title, artist, source, blob, album = "", artwork = "", duration = 0, saavnId = "", query = "", srcUrl = "", albumId = "", track = 0, year = "" }) {
+async function addSong({ title, artist, source, blob, album = "", artwork = "", duration = 0, saavnId = "", query = "", srcUrl = "", albumId = "", track = 0, year = "", downloadedAsAlbum = false }) {
   const existing = saavnId ? songs.find((s) => s.saavnId === saavnId) : null;
   if (existing) {
     await saveBlob(existing.id, blob);
     delete existing.needsReadd;
+    if (downloadedAsAlbum) existing.downloadedAsAlbum = true;
     saveMeta(); render(); updateStorageInfo();
     return existing.id;
   }
@@ -2687,7 +2688,7 @@ async function addSong({ title, artist, source, blob, album = "", artwork = "", 
   // they let a future sync/restore re-fetch the audio: jiosaavn via saavnId
   // (query as fallback), web songs via the original srcUrl.
   // albumId/track/year power the Albums view (album order, grouping).
-  songs.unshift({ id, title, artist, source, favorite: false, playlists: [], createdAt: Date.now(), lastPlayedAt: 0, playCount: 0, album, artwork, duration, saavnId, query, srcUrl, albumId, track, year });
+  songs.unshift({ id, title, artist, source, favorite: false, playlists: [], createdAt: Date.now(), lastPlayedAt: 0, playCount: 0, album, artwork, duration, saavnId, query, srcUrl, albumId, track, year, downloadedAsAlbum });
   if (!saveMeta()) {
     songs = songs.filter((s) => s.id !== id);
     await deleteBlob(id);
@@ -3352,7 +3353,15 @@ function renderRemoteAlbumPage() {
     dl.disabled = pending === missing.length;
     dl.addEventListener("click", () => {
       let n = 0;
-      missing.forEach((t) => { if (!queued(t)) { enqueueDownload(t); n++; } });
+      // Remember the album action, including tracks already saved or queued.
+      tracks.forEach((t) => {
+        const local = haveSong(t);
+        if (local) local.downloadedAsAlbum = true;
+        const job = downloadQueue.find((j) => j.id === t.id && ["queued", "downloading"].includes(j.state));
+        if (job) job.result.downloadedAsAlbum = true;
+      });
+      saveMeta();
+      missing.forEach((t) => { if (!queued(t)) { enqueueDownload({ ...t, downloadedAsAlbum: true }); n++; } });
       showToast(`Downloading ${n} song${n !== 1 ? "s" : ""} for offline`);
       renderRemoteAlbumPage();
     });
@@ -3421,7 +3430,13 @@ function buildAlbums() {
     a.artist = names.length > 2 ? "Various Artists" : names.join(", ");
     a.coverSong = a.songs.find((s) => (artCache.has(s.id) || savedArtworkIds.has(s.id))) || a.songs[0];
   }
-  return [...map.values()];
+  return [...map.values()].filter((a) => {
+    if (a.songs.some((s) => s.downloadedAsAlbum === true)) return true;
+    // Older downloads have no provenance flag. Keep multi-track collections
+    // with album track numbers; a release name alone does not mean a saved album.
+    const legacyTracks = a.songs.filter((s) => s.downloadedAsAlbum === undefined && s.track > 0);
+    return new Set(legacyTracks.map((s) => s.track)).size > 1;
+  });
 }
 function buildArtists() {
   const map = new Map();
@@ -3912,7 +3927,7 @@ function renderHome() {
     recent.innerHTML = `<div class="home-empty"><span class="home-empty-symbol">♫</span><h3>Your sound. Everywhere.</h3><p>Download your favorites and make yourself at home. Your music stays with you offline.</p><button type="button" class="pill-btn accent">Find your music</button></div>`;
     recent.querySelector("button").addEventListener("click", () => switchTab("view-search"));
   }
-  if (!albums.length) albumGrid.innerHTML = `<p class="home-empty-albums">Your saved albums will live here. Find an album in Search, or add album details to your songs below.</p>`;
+  if (!albums.length) albumGrid.innerHTML = `<p class="home-empty-albums">Albums you download in Search will appear here. Individual downloads stay in Songs.</p>`;
   $("home-library-note").textContent = `${downloaded.length} song${downloaded.length === 1 ? "" : "s"} · ${albums.length} album${albums.length === 1 ? "" : "s"} · Yours to play offline`;
 }
 

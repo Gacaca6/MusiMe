@@ -998,9 +998,11 @@ button:focus-visible, [tabindex]:focus-visible { outline: 2px solid #e5c2aa; out
 .view { width: 100%; padding-bottom: calc(var(--tab-h) + var(--mini-h) + var(--safe-bottom) + 36px); }
 .home-view {
   background: radial-gradient(ellipse 110% 360px at 50% -100px, #78370f 0%, #472615 46%, transparent 100%);
-  padding: calc(var(--safe-top) + 32px) 16px calc(var(--tab-h) + var(--mini-h) + var(--safe-bottom) + 40px);
+  --home-side: 16px;
+  --home-header-top: 32px;
+  padding: 0 var(--home-side) calc(var(--tab-h) + var(--mini-h) + var(--safe-bottom) + 40px);
 }
-.home-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 22px; }
+.home-header { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 calc(-1 * var(--home-side)); padding: calc(var(--safe-top) + var(--home-header-top)) var(--home-side) 22px; background: radial-gradient(ellipse 110% 360px at 50% -100px, #78370f 0%, #472615 46%, transparent 100%), #222; }
 .home-identity { display: flex; align-items: center; gap: 12px; }
 .home-avatar { width: 52px; height: 52px; border-radius: 50%; border: 1px solid #b7a294; background: #332d29; }
 .home-greeting { font-size: 13px; color: #c0a08d; margin-bottom: 3px; }
@@ -1060,8 +1062,7 @@ button:focus-visible, [tabindex]:focus-visible { outline: 2px solid #e5c2aa; out
 .header-actions { flex-wrap: wrap; justify-content: flex-end; }
 @media(min-width:768px) {
   .view { max-width: 900px; }
-  .home-view { padding-left: 32px; padding-right: 32px; }
-  .home-header { margin-top: 10px; }
+  .home-view { --home-side: 32px; --home-header-top: 42px; }
   .home-actions { max-width: 580px; }
   .home-track { width: 22%; }
   .home-albums { grid-template-columns: repeat(4,1fr); grid-auto-rows: 140px; }
@@ -1069,7 +1070,7 @@ button:focus-visible, [tabindex]:focus-visible { outline: 2px solid #e5c2aa; out
   .mini-player { width: min(600px,calc(100% - 24px)); max-width: 600px; left: 50%; right: auto; transform: translateX(-50%); }
 }
 @media(max-width:360px) {
-  .home-view { padding-left: 12px; padding-right: 12px; }
+  .home-view { --home-side: 12px; }
   .home-actions button { font-size: 13px; gap: 5px; }
   .home-actions svg { width: 19px; }
   .mini-content { grid-template-columns: 40px minmax(0,1fr) auto; gap: 6px; }

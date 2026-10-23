@@ -8,7 +8,7 @@ const pw = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root = path.resolve(__dirname, '..');
 const output = path.resolve(process.env.TEST_OUTPUT_DIR || path.join(root, 'test-results'));
 fs.mkdirSync(output, { recursive: true });
-const build = '2026.10.23.2';
+const build = '2026.10.23.3';
 const results = [];
 const browserResourceDiagnostics = [];
 let activeScenario = "";
@@ -167,7 +167,10 @@ async function runFrontend() {
     try {
       await seed(page, [], { playlists: ['All songs'] }); assert.equal(await page.locator('#home-shuffle').isDisabled(), true);
       await page.locator('.home-empty button').click(); assert.equal(await page.locator('#view-search').isVisible(), true);
-      await seed(page, library(1)); assert.equal(await page.locator('.home-album').count(), 1);
+      await seed(page, library(1));
+      // A single song's release metadata must not create a saved album.
+      assert.equal(await page.locator('.home-album').count(), 0);
+      assert.equal(await page.locator('#songs .song').count(), 1);
       await clickMode(page, 'songs'); await page.locator('#home-options-toggle').click(); await page.locator('#search-input').fill('nothing like this');
       assert.match(await page.locator('#songs').textContent(), /No matching downloads/);
       await noErrors(errors);
