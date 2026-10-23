@@ -1,4 +1,4 @@
-const APP_VERSION = "2026.10.23.3";
+const APP_VERSION = "2026.10.23.4";
 const DB_NAME = "musime-db";
 const STORE_NAME = "songs";
 const SONGS_KEY = "musime-songs-meta";

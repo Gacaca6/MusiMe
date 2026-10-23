@@ -26,13 +26,26 @@ html, body {
   overflow: hidden;
 }
 
+/* Paint the iPhone home-indicator region as part of the active surface. */
+html { background: #191919; overscroll-behavior: none; }
+html:has(.lyrics-full:not(.hidden)) {
+  background: linear-gradient(rgba(0,0,0,0.25), rgba(0,0,0,0.25)), var(--lyr-color, #5a48c8);
+}
+
 body {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
   background: var(--bg);
   color: var(--text);
   -webkit-font-smoothing: antialiased;
-  position: fixed;
-  inset: 0;
+  position: relative;
+  height: 100%;
+  height: 100dvh;
+}
+
+/* In standalone WebKit, dynamic viewport units can exclude part of the
+   screen. Use the full viewport and anchor edge surfaces to this body. */
+@media (display-mode: standalone) {
+  body { height: 100vh; }
 }
 
 /* ═══════════════ SPLASH ═══════════════ */
@@ -70,7 +83,7 @@ body {
 
 /* ═══════════════ LAYOUT ═══════════════ */
 .app-shell {
-  position: fixed;
+  position: absolute;
   inset: 0;
   display: flex;
   flex-direction: column;
@@ -400,7 +413,7 @@ select {
 
 /* ═══════════════ MINI PLAYER ═══════════════ */
 .mini-player {
-  position: fixed;
+  position: absolute;
   left: 0; right: 0;
   bottom: var(--tab-h);
   height: var(--mini-h);
@@ -648,7 +661,7 @@ select {
 
 /* ═══════════════ TAB BAR ═══════════════ */
 .tab-bar {
-  position: fixed; left: 0; right: 0; bottom: 0;
+  position: absolute; left: 0; right: 0; bottom: 0;
   display: grid; grid-template-columns: repeat(4, 1fr);
   background: rgba(10,10,15,0.97);
   /* backdrop-filter removed for old-device performance (see mini-player note) */
@@ -774,10 +787,10 @@ select {
 
 /* Full-screen lyrics view */
 .lyrics-full {
-  position: fixed; inset: 0; z-index: 260;
+  position: absolute; inset: 0; z-index: 260;
   display: flex; flex-direction: column;
   background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(0,0,0,0.25)), var(--lyr-color, #5a48c8);
-  padding: max(var(--safe-top), 0.5rem) 0 max(env(safe-area-inset-bottom), 0.8rem);
+  padding: max(var(--safe-top), 0.5rem) 0 max(var(--safe-bottom), 0.8rem);
   animation: slideUp 260ms ease-out;
 }
 .lyrics-full.hidden { display: none; }
@@ -1047,7 +1060,7 @@ button:focus-visible, [tabindex]:focus-visible { outline: 2px solid #e5c2aa; out
 .home-music-heading h2 { font-size: 21px; font-weight: 400; letter-spacing: -.55px; }
 .home-music .header-actions { justify-content: flex-start; }
 .tab-bar { left: 0; right: 0; bottom: 0; height: var(--tab-h); padding: 8px 0 var(--tab-pad-bottom); grid-template-columns: repeat(3,1fr); background: #191919; border: 0; border-top: 1px solid #ffffff14; border-radius: 0; box-shadow: 0 -6px 20px #0004; max-width: none; transform: none; }
-.tab { font-size: 11px; gap: 5px; color: #a9a8a5; justify-content: center; }
+.tab { font-size: 11px; gap: 5px; padding: 0; min-height: 0; color: #a9a8a5; justify-content: center; }
 .tab svg { width: 26px; height: 26px; }
 .tab.active { color: #f4f3f0; }
 .mini-player { left: 12px; right: 12px; bottom: calc(var(--tab-h) + 8px); height: var(--mini-h); border: 2px solid #5b5652; border-radius: 32px 32px 12px 12px; background: linear-gradient(105deg,#454441,#99734c 65%,#b2a3ae); overflow: hidden; box-shadow: 0 4px 16px #0003; }

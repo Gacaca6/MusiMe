@@ -8,7 +8,7 @@ const pw = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root = path.resolve(__dirname, '..');
 const output = path.resolve(process.env.TEST_OUTPUT_DIR || path.join(root, 'test-results'));
 fs.mkdirSync(output, { recursive: true });
-const build = '2026.10.23.3';
+const build = '2026.10.23.4';
 const results = [];
 const browserResourceDiagnostics = [];
 let activeScenario = "";
@@ -117,6 +117,50 @@ async function storageSnapshot(page) {
   });
 }
 async function runFrontend() {
+  await check('edge-to-edge Home and lyrics, safe-area controls, scroll and rotation', async () => {
+    const { context, page, errors } = await contextPage();
+    try {
+      await seed(page, library(40));
+      await page.locator('#splash').waitFor({ state: 'hidden' });
+      await page.evaluate(() => {
+        const root = document.documentElement.style;
+        root.setProperty('--safe-top', '47px');
+        root.setProperty('--safe-bottom', '34px');
+        root.setProperty('--tab-pad-bottom', '34px');
+        root.setProperty('--lyr-color', 'rgb(165, 63, 33)');
+      });
+      for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }]) {
+        await page.setViewportSize(viewport);
+        const nav = await page.locator('.tab-bar').boundingBox();
+        assert.ok(Math.abs(nav.y + nav.height - viewport.height) < 1);
+        const tab = await page.locator('.tab').first().boundingBox();
+        assert.ok(tab.y + tab.height <= viewport.height - 34);
+        const header = await page.locator('.home-header').boundingBox();
+        await page.locator('#view-home').evaluate((e) => e.scrollTop = 500);
+        assert.deepEqual(await page.locator('.tab-bar').boundingBox(), nav);
+        assert.equal((await page.locator('.home-header').boundingBox()).y, header.y);
+        assert.equal(await page.evaluate(() => window.scrollY), 0);
+        assert.equal(await page.evaluate(() => getComputedStyle(document.documentElement).backgroundColor), 'rgb(25, 25, 25)');
+        await page.evaluate(() => {
+          document.querySelector('#lf-title').textContent = 'Offline lyrics';
+          document.querySelector('#lyrics-full').classList.remove('hidden');
+        });
+        await page.locator('#lyrics-full').evaluate((e) => Promise.all(e.getAnimations().map((a) => a.finished)));
+        const lyrics = await page.locator('#lyrics-full').boundingBox();
+        assert.ok(Math.abs(lyrics.x) < 1 && Math.abs(lyrics.y) < 1);
+        assert.ok(Math.abs(lyrics.width - viewport.width) < 1 && Math.abs(lyrics.height - viewport.height) < 1);
+        const play = await page.locator('#lf-play').boundingBox();
+        assert.ok(play.y + play.height <= viewport.height - 34);
+        assert.equal(await page.evaluate(() => getComputedStyle(document.documentElement).backgroundColor), 'rgb(165, 63, 33)');
+        assert.equal(await page.evaluate(() => document.elementFromPoint(innerWidth / 2, innerHeight - 1).id), 'lyrics-full');
+        if (viewport.width === 390) await page.screenshot({ path: path.join(output, 'edge-to-edge-lyrics.png') });
+        await page.locator('#lf-close').click();
+        assert.equal(await page.evaluate(() => document.elementFromPoint(innerWidth / 2, innerHeight - 1).closest('.tab-bar') !== null), true);
+        if (viewport.width === 390) await page.screenshot({ path: path.join(output, 'edge-to-edge-home.png') });
+      }
+      await noErrors(errors);
+    } finally { await context.close(); }
+  });
   await check('10,000 songs: bounded DOM, pagination, filters, albums, artists, playlists', async () => {
     const { context, page, errors } = await contextPage();
     try {
