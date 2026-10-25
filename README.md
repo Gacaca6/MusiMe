@@ -10,10 +10,13 @@ Built offline-first for people with little or expensive internet: download once,
 - Opens to your own collection: recently added songs, a recently added album mosaic, and downloaded songs
 - Filters for All, Songs, Albums and Artists; album and artist pages play in the right order
 - Shuffle all, Create Playlist, favorites, sorting, and edit song info (title, artist, album, track number)
-- Floating mini player with previous, play/pause and next
+- Floating mini player with previous, play/pause and next; Previous once replays, twice quickly goes to the previous song
 
 **Search: find and download**
-- Search songs and full albums (JioSaavn, with mirror fallback)
+- All / Songs / Artists / Albums search using the same JioSaavn source, with mirror fallback
+- Title relevance ranking, spelling-tolerant candidate matching, and artist pages selected by identity
+- Downloaded matches play offline; live searches use a small temporary metadata cache
+- Cancelled searches cannot overwrite newer results; failed requests offer retries without losing loaded pages
 - Album pages show track list, length and download size before you download
 - Tap any result to hear a short preview first (low-bitrate to save data)
 - **Data Saver**: choose Data Saver, Normal (default) or High download quality, with sizes shown

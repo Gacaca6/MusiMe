@@ -8,7 +8,7 @@ const pw = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root = path.resolve(__dirname, '..');
 const output = path.resolve(process.env.TEST_OUTPUT_DIR || path.join(root, 'test-results'));
 fs.mkdirSync(output, { recursive: true });
-const build = '2026.10.23.4';
+const build = '2026.10.25.1';
 const results = [];
 const browserResourceDiagnostics = [];
 let activeScenario = "";
@@ -57,6 +57,7 @@ async function contextPage(options = {}) {
   const page = await context.newPage();
   await page.addInitScript(() => { window.__fullBlobReads = 0; const read = IDBObjectStore.prototype.getAll; IDBObjectStore.prototype.getAll = function (...args) { if (this.name === 'songs' && args[0] === undefined) window.__fullBlobReads++; return read.apply(this, args); }; });
   const errors = [];
+  if (process.env.TEST_DEBUG) { page.on('request', (r) => console.log('REQ', r.url())); page.on('requestfinished', (r) => console.log('DONE', r.url())); page.on('pageerror', (e) => console.log('PAGE ERROR', e.message)); }
   page.on('pageerror', (error) => {
     if (process.env.TEST_BROWSER === 'webkit' && /due to access control checks\.$/.test(error.message)) browserResourceDiagnostics.push({ scenario: activeScenario, message: error.message });
     else errors.push(error.message);
@@ -116,7 +117,253 @@ async function storageSnapshot(page) {
       bytes: await Promise.all(rows.map(async (blob) => ({ size: blob.size ?? blob.data.byteLength, hash: [...new Uint8Array(await crypto.subtle.digest('SHA-256', blob instanceof Blob ? await blob.arrayBuffer() : blob.data))].join(',') }))) };
   });
 }
+function searchSong(id, name, artist = "Test artist", artistId = "artist", extra = {}) {
+  return { id, name, duration: 60, playCount: 10, album: { id: `release-${id}`, name },
+    artists: { primary: [{ id: artistId, name: artist }] }, image: [{ quality: '500x500', url: origin + '/art.svg' }],
+    downloadUrl: [{ quality: '96kbps', url: origin + '/audio.wav' }, { quality: '160kbps', url: origin + '/audio.wav' }], ...extra };
+}
+async function searchMock(context, handler) {
+  await context.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url());
+    const result = await handler(url);
+    if (process.env.TEST_DEBUG) console.log("MOCK", url.href, result?.json?.data?.results?.length, result?.status);
+    if (result?.abort) { await route.abort('failed').catch(() => {}); return; }
+    await route.fulfill({ status: result?.status || 200, headers: { 'Access-Control-Allow-Origin': '*' },
+      json: result?.json || { success: true, data: { total: 0, results: [] } } }).catch(() => {});
+  });
+}
+async function submitSearch(page, query) {
+  await page.locator('[data-view="view-search"]').click();
+  await page.locator('#search-query').fill(query); await page.locator('#search-query').press('Enter');
+}
+async function searchSettled(page) { await page.waitForFunction(() => document.getElementById('search-results').getAttribute('aria-busy') === 'false'); }
 async function runFrontend() {
+  await check('previous: single press replays; double press navigates across mini, full and media controls', async () => {
+    const { context, page, errors } = await contextPage();
+    try {
+      await page.addInitScript(() => {
+        window.__mediaActions = {};
+        if (navigator.mediaSession) {
+          const original = navigator.mediaSession.setActionHandler.bind(navigator.mediaSession);
+          navigator.mediaSession.setActionHandler = (action, handler) => { window.__mediaActions[action] = handler; return original(action, handler); };
+        }
+      });
+      await seed(page, library(3)); await clickMode(page, 'songs');
+      await page.locator('.song-main').nth(2).click();
+      await page.waitForFunction(() => !document.getElementById('audio').paused && document.getElementById('audio').readyState >= 2);
+      const originalSrc = await page.locator('#audio').getAttribute('src');
+      await page.locator('#audio').evaluate((a) => a.currentTime = 30);
+      await page.locator('#mini-prev').click();
+      assert.equal(await page.locator('#mini-title').textContent(), 'Song 00002');
+      assert.ok(await page.locator('#audio').evaluate((a) => a.currentTime < 2 && !a.paused));
+      assert.equal(await page.locator('#audio').getAttribute('src'), originalSrc, 'Replay must not reload a healthy audio source');
+      await page.waitForTimeout(900);
+      await page.locator('#audio').evaluate((a) => { a.pause(); a.currentTime = 25; });
+      await page.locator('#mini-prev').click();
+      await page.waitForFunction(() => !document.getElementById('audio').paused);
+      assert.ok(await page.locator('#audio').evaluate((a) => a.currentTime < 2));
+      assert.ok(await page.evaluate(() => JSON.parse(localStorage.getItem('musime-playback-state')).currentTime < 2));
+      await page.waitForTimeout(900);
+      await page.locator('#mini-prev').dblclick();
+      await page.waitForFunction(() => document.getElementById('mini-title').textContent === 'Song 00001');
+      await page.locator('#mini-title').click();
+      await page.locator('#np-prev').click();
+      assert.equal(await page.locator('#np-title').textContent(), 'Song 00001');
+      await page.locator('#np-prev').click();
+      await page.waitForFunction(() => document.getElementById('mini-title').textContent === 'Song 00000');
+      await page.locator('#np-close').click();
+      await page.evaluate(() => window.__mediaActions.previoustrack());
+      assert.equal(await page.locator('#mini-title').textContent(), 'Song 00000');
+      await page.evaluate(() => window.__mediaActions.previoustrack());
+      await page.waitForFunction(() => document.getElementById('mini-title').textContent === 'Song 00002');
+      // Next or a newly selected track must invalidate the preceding press.
+      await page.locator('#mini-prev').click();
+      await page.locator('.song-main').nth(1).click();
+      await page.waitForFunction(() => document.getElementById('mini-title').textContent === 'Song 00001');
+      await page.locator('#mini-prev').click();
+      assert.equal(await page.locator('#mini-title').textContent(), 'Song 00001');
+      await noErrors(errors);
+    } finally { await context.close(); }
+  });
+  await check('search: title relevance, versions, safe metadata, preview and download persist', async () => {
+    const { context, page, errors } = await contextPage(process.env.TEST_BROWSER === 'webkit' ? { serviceWorkers: 'block' } : {});
+    try {
+      await searchMock(context, (url) => {
+        if (!url.pathname.endsWith('/search/songs')) return;
+        return { json: { success: true, data: { total: 6, results: [
+          searchSong('incidental', 'Different song', 'Nakupenda', 'other', { playCount: 999999999 }),
+          searchSong('live', 'Nakupenda (Live)', 'TXC', 'txc', { duration: 90 }),
+          searchSong('original', 'Nakupenda', 'TXC', 'txc'), searchSong('duplicate', 'Nakupenda', 'TXC', 'txc'),
+          searchSong('unsafe', 'Unsafe result', 'Other', 'other', { downloadUrl: [{ url: 'javascript:alert(1)' }] }),
+          searchSong('html', '<img src=x onerror="window.__searchInjected=true">', 'Other'),
+        ] } } };
+      });
+      await seed(page, []); await submitSearch(page, 'Nakupenda'); await searchSettled(page);
+      assert.equal(await page.locator('.result-info .title').first().textContent(), 'Nakupenda');
+      assert.equal(await page.locator('#search-results .result-item').count(), 4);
+      assert.equal(await page.evaluate(() => window.__searchInjected), undefined);
+      const row = page.locator('.result-item').first();
+      await row.locator('.search-preview').click();
+      if (process.env.TEST_BROWSER !== 'webkit') {
+        await page.waitForFunction(() => [...document.querySelectorAll('audio')].some((a) => a.id !== 'audio' && !a.paused));
+        assert.equal(await page.locator('#audio').evaluate((a) => a.paused), true);
+        await row.locator('.search-preview').click();
+        assert.equal(await row.evaluate((e) => e.classList.contains('previewing')), false);
+      }
+      await row.locator('.add-btn').click();
+      await page.waitForFunction(() => JSON.parse(localStorage.getItem('musime-songs-meta') || '[]').some((s) => s.saavnId === 'original'));
+      assert.equal(await row.locator('.add-btn').textContent(), '✓');
+      await row.locator('.add-btn').click();
+      assert.equal(await page.locator('#songs .song').count(), 1);
+      await page.reload(); await page.waitForFunction(() => document.body.dataset.libraryReady === 'true');
+      assert.equal(await page.locator('#songs .song').count(), 1);
+      await noErrors(errors);
+    } finally { await context.close(); }
+  });
+  await check('search: deeper title retrieval, page zero, retry and bounded pagination', async () => {
+    const { context, page, errors } = await contextPage(process.env.TEST_BROWSER === 'webkit' ? { serviceWorkers: 'block' } : {}); let failNext = false;
+    const pages = [];
+    try {
+      await searchMock(context, (url) => {
+        if (!url.pathname.endsWith('/search/songs')) return;
+        const p = Number(url.searchParams.get('page')); pages.push(p);
+        if (p === 2 && failNext) return { status: 503 };
+        const tracks = Array.from({ length: 30 }, (_, i) => searchSong(`${p}-${i}`, p === 1 && i === 0 ? 'Hidden Gem' : `Other ${p}-${i}`));
+        return { json: { data: { total: 999, results: tracks } } };
+      });
+      await seed(page, []); await submitSearch(page, 'Hidden Gem'); await searchSettled(page);
+      assert.deepEqual(pages, [0, 1]);
+      assert.equal(await page.locator('.result-info .title').first().textContent(), 'Hidden Gem');
+      assert.equal(await page.locator('.result-item').count(), 60);
+      failNext = true; await page.locator('.load-more-btn').click(); await searchSettled(page);
+      assert.equal(await page.locator('.result-item').count(), 60);
+      assert.match(await page.locator('#search-results').textContent(), /Could not load more/);
+      failNext = false; await page.locator('.load-more-btn').click(); await searchSettled(page);
+      await page.locator('.load-more-btn').click(); await searchSettled(page);
+      assert.equal(await page.locator('.result-item').count(), 120);
+      assert.equal(await page.locator('.load-more-btn').count(), 0);
+      assert.match(await page.locator('#search-results').textContent(), /closest 120/);
+      await noErrors(errors);
+    } finally { await context.close(); }
+  });
+  await check('search: artist identity, similar names, artist-only browsing and catalog pagination', async () => {
+    const { context, page, errors } = await contextPage(process.env.TEST_BROWSER === 'webkit' ? { serviceWorkers: 'block' } : {}); const catalogPages = [];
+    try {
+      await searchMock(context, (url) => {
+        if (url.pathname.endsWith('/search/artists')) return { json: { data: { results: [
+          { id: 'wrong', name: 'Israel Mbonyicyambu' }, { id: 'correct', name: 'Israel Mbonyi' }, { id: {}, name: 'Bad identity' }, null,
+        ] } } };
+        if (url.pathname.endsWith('/search/songs')) return { json: { data: { total: 1, results: [searchSong('false', 'Israel Mbonyi tribute', 'Other singer', 'wrong')] } } };
+        if (url.pathname.endsWith('/artists/correct/songs')) {
+          const p = Number(url.searchParams.get('page')); catalogPages.push(p);
+          return { json: { data: { total: 4, songs: [searchSong(`correct-${p}`, `Real artist song ${p}`, 'Israel Mbonyi', 'correct'), searchSong(`wrong-${p}`, 'Wrong artist song', 'Other singer', 'wrong')] } } };
+        }
+      });
+      await seed(page, []); await submitSearch(page, 'Israel Mbonyi'); await searchSettled(page);
+      assert.equal(await page.locator('.search-artist strong').first().textContent(), 'Israel Mbonyi');
+      assert.match(await page.locator('.result-info .title').first().textContent(), /Real artist song/);
+      assert.equal(await page.getByText('Wrong artist song', { exact: true }).count(), 0);
+      await page.locator('.search-artist').filter({ hasText: 'Israel MbonyiArtist' }).click(); await searchSettled(page);
+      assert.equal(await page.locator('.result-item').count(), 1);
+      await page.locator('.load-more-btn').click(); await searchSettled(page);
+      assert.equal(await page.locator('.result-item').count(), 2);
+      assert.deepEqual(catalogPages, [0, 1]); // reopening uses the bounded metadata cache
+      await page.locator('.search-back').click(); await searchSettled(page);
+      await page.locator('#search-mode [data-mode="artists"]').click(); await searchSettled(page);
+      assert.equal(await page.locator('.result-item').count(), 0);
+      assert.equal(await page.locator('.search-artist').count(), 2);
+      await noErrors(errors);
+    } finally { await context.close(); }
+  });
+  await check('search: crowded titles expand candidates; empty artist catalogs keep song pagination available', async () => {
+    const { context, page, errors } = await contextPage(process.env.TEST_BROWSER === 'webkit' ? { serviceWorkers: 'block' } : {});
+    try {
+      await searchMock(context, (url) => {
+        if (url.pathname.endsWith('/search/artists')) return { json: { data: { results: [{ id: 'same-name', name: 'One' }] } } };
+        if (url.pathname.endsWith('/artists/same-name/songs')) return { json: { data: { songs: [], total: 0 } } };
+        if (url.pathname.endsWith('/search/songs')) return { json: { data: { total: 90, results: Array.from({ length: 30 }, (_, i) => { const n = Number(url.searchParams.get('page')) * 30 + i; return searchSong(`one-${n}`, 'One', `Singer ${n}`, `singer-${n}`, { playCount: n === 30 ? 100000 : 1 }); }) } } };
+      });
+      await seed(page, []); await submitSearch(page, 'One'); await searchSettled(page);
+      assert.equal(await page.locator('.result-item').count(), 60);
+      assert.match(await page.locator('.result-info .meta').first().textContent(), /Singer 30/);
+      assert.equal(await page.locator('.load-more-btn').count(), 1);
+      assert.equal(await page.locator('.search-artists-compact').count(), 1);
+      await page.locator('.search-artist').click(); await searchSettled(page);
+      assert.equal(await page.locator('.result-item').count(), 0);
+      assert.match(await page.locator('#search-results').textContent(), /No results found/);
+      await page.locator('.search-back').click(); await searchSettled(page);
+      assert.equal(await page.locator('.load-more-btn').count(), 1);
+      await noErrors(errors);
+    } finally { await context.close(); }
+  });
+  await check('search: stalled requests hit the overall deadline and release the loading state', async () => {
+    const { context, page, errors } = await contextPage(process.env.TEST_BROWSER === 'webkit' ? { serviceWorkers: 'block' } : {});
+    try {
+      await context.route('**/api/**', () => {});
+      await seed(page, []); await page.locator('#splash').waitFor({ state: 'hidden' });
+      await page.clock.install();
+      const request = page.waitForRequest((r) => r.url().includes('/api/search/songs'));
+      await submitSearch(page, 'stalled'); await request;
+      await page.clock.fastForward(19000); await searchSettled(page);
+      assert.match(await page.locator('#search-results').textContent(), /Search took too long/);
+      assert.equal(await page.locator('.search-retry').count(), 1);
+      await noErrors(errors);
+    } finally { await context.close(); }
+  });
+  await check('search: slow old queries, clearing input and album mode cannot overwrite newer results', async () => {
+    const { context, page, errors } = await contextPage(process.env.TEST_BROWSER === 'webkit' ? { serviceWorkers: 'block' } : {});
+    try {
+      await searchMock(context, async (url) => {
+        const q = url.searchParams.get('query');
+        if (q === 'slow' || url.pathname.endsWith('/search/albums')) await new Promise((r) => setTimeout(r, 700));
+        if (url.pathname.endsWith('/search/albums')) return { json: { data: { results: [{ id: 'old', name: 'Stale album' }] } } };
+        if (url.pathname.endsWith('/search/songs')) return { json: { data: { results: [searchSong(q, q)] } } };
+      });
+      await seed(page, []); await submitSearch(page, 'slow');
+      await page.locator('#search-query').fill('latest'); await page.locator('#search-query').press('Enter'); await searchSettled(page);
+      await page.waitForTimeout(900);
+      assert.equal(await page.locator('.result-info .title').textContent(), 'latest');
+      await page.locator('#search-mode [data-mode="albums"]').click();
+      await page.locator('#search-mode [data-mode="songs"]').click(); await searchSettled(page); await page.waitForTimeout(900);
+      assert.equal(await page.locator('.album-card').count(), 0);
+      assert.equal(await page.locator('.result-info .title').textContent(), 'latest');
+      await page.locator('#search-query').fill('slow'); await page.locator('#search-query').press('Enter'); await page.locator('#search-query').fill('');
+      await page.waitForTimeout(900);
+      assert.equal(await page.locator('.result-item').count(), 0);
+      assert.match(await page.locator('#search-results').textContent(), /Search for any song/);
+      await noErrors(errors);
+    } finally { await context.close(); }
+  });
+  await check('search: outages, malformed mirrors, offline library and narrow layouts recover safely', async () => {
+    const { context, page, errors } = await contextPage(process.env.TEST_BROWSER === 'webkit' ? { serviceWorkers: 'block' } : {}); let working = false;
+    try {
+      await searchMock(context, (url) => {
+        if (!working) return { status: 503 };
+        if (url.hostname === 'jiosavan-api2.vercel.app') return { json: { data: { results: 'malformed' } } };
+        if (url.pathname.endsWith('/search/artists')) return { json: { data: { results: [] } } };
+        return { json: { data: { results: [null, {}, searchSong('recovered', 'Recovered song', 'Very long artist '.repeat(15))] } } };
+      });
+      await seed(page, [{ ...library(1)[0], title: 'Offline match' }]);
+      await submitSearch(page, 'Recovered'); await searchSettled(page);
+      assert.match(await page.locator('#search-results').textContent(), /temporarily unavailable/);
+      assert.equal(await page.locator('.search-retry').count(), 1);
+      working = true; await page.locator('.search-retry').click(); await searchSettled(page);
+      assert.equal(await page.locator('.result-item').count(), 1);
+      for (const width of [280, 320, 390, 900]) {
+        await page.setViewportSize({ width, height: 844 });
+        assert.equal(await page.evaluate(() => document.querySelector('#view-search').scrollWidth <= document.querySelector('#view-search').clientWidth), true);
+      }
+      if (process.env.TEST_BROWSER !== 'webkit') await page.evaluate(() => navigator.serviceWorker.ready);
+      await context.setOffline(true);
+      await submitSearch(page, 'Offline match'); await searchSettled(page);
+      assert.match(await page.locator('#search-results').textContent(), /You're offline/);
+      assert.equal(await page.locator('.search-local-song').count(), 1);
+      if (process.env.TEST_BROWSER !== 'webkit') {
+        await page.locator('.search-local-song').click(); await page.waitForFunction(() => !document.getElementById('audio').paused);
+      }
+      await noErrors(errors);
+    } finally { await context.close(); }
+  });
   await check('edge-to-edge Home and lyrics, safe-area controls, scroll and rotation', async () => {
     const { context, page, errors } = await contextPage();
     try {
@@ -190,6 +437,12 @@ async function runFrontend() {
       await page.locator('[data-view="view-playlists"]').click(); assert.equal(await page.locator('.playlist-card').count(), 100);
       await page.locator('#playlists .collection-pager button').last().click(); assert.equal(await page.locator('.playlist-card').count(), 100);
       await noErrors(errors);
+      await searchMock(context, () => ({ json: { data: { results: [], total: 0 } } }));
+      const searchStart = Date.now();
+      await submitSearch(page, 'Song'); await searchSettled(page);
+      const searchMs = Date.now() - searchStart;
+      assert.equal(await page.locator('.search-local-song').count(), 5);
+      assert.ok(searchMs < 5000, `Search of 10,000 downloaded songs took ${searchMs}ms`);
       await page.locator('[data-view="view-home"]').click(); await clickMode(page, 'songs');
       await page.screenshot({ path: path.join(output, 'large-library.png') });
       return { bootIncludingFixtureSetupMs: bootMs, libraryReadyMs: await page.evaluate(() => performance.getEntriesByName("musime-library-ready")[0]?.startTime), domNodes: nodes, songRows: 100, totalSongs: 10000 };
@@ -295,7 +548,7 @@ async function runFrontend() {
     try {
       await seed(page, library(2));
       await page.locator('[data-view="view-search"]').click(); await page.locator('#search-query').fill('network failure'); await page.locator('#search-query').press('Enter');
-      await page.waitForFunction(() => document.getElementById('search-results').textContent.includes('No results'));
+      await page.waitForFunction(() => document.getElementById('search-results').textContent.includes('temporarily unavailable'));
       await page.locator('[data-view="view-home"]').click(); await page.locator('[aria-label="Settings"]').click();
       for (const name of ['fail.mp3', 'error.mp3', 'empty.mp3']) {
         await page.locator('#song-url').fill(`${origin}/${name}`); await page.locator('#song-title').fill('Must not save'); await page.locator('#url-form button').click();

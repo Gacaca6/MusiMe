@@ -13,7 +13,7 @@
     <!-- iOS home-screen icon MUST be PNG — SVG apple-touch-icons never load -->
     <link rel="apple-touch-icon" href="icons/icon-180.png" />
     <title>MusiMe</title>
-    <link rel="stylesheet" href="styles.css?v=2026.10.23.4" />
+    <link rel="stylesheet" href="styles.css?v=2026.10.25.1" />
   </head>
   <body>
 
@@ -119,14 +119,16 @@
         </header>
         <form id="search-form" class="search-bar" action="javascript:void(0)">
           <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-          <input id="search-query" type="search" placeholder="Search songs, artists..." required />
+          <input id="search-query" type="search" placeholder="Search songs, artists…" maxlength="150" autocomplete="off" required />
         </form>
-        <div id="search-mode" class="seg" role="tablist">
-          <button type="button" class="seg-btn active" data-mode="songs">Songs</button>
-          <button type="button" class="seg-btn" data-mode="albums">Albums</button>
+        <div id="search-mode" class="seg" role="tablist" aria-label="Search category">
+          <button type="button" class="seg-btn active" data-mode="all" role="tab" aria-selected="true" tabindex="0">All</button>
+          <button type="button" class="seg-btn" data-mode="songs" role="tab" aria-selected="false" tabindex="-1">Songs</button>
+          <button type="button" class="seg-btn" data-mode="artists" role="tab" aria-selected="false" tabindex="-1">Artists</button>
+          <button type="button" class="seg-btn" data-mode="albums" role="tab" aria-selected="false" tabindex="-1">Albums</button>
         </div>
         <div id="download-queue" class="download-queue hidden"></div>
-        <div id="search-results" class="search-results">
+        <div id="search-results" class="search-results" aria-busy="false">
           <div class="empty-state">
             <div class="empty-icon">&#9835;</div>
             <p>Search for any song or artist</p>
@@ -315,7 +317,7 @@
         <button id="np-shuffle" class="np-ctrl-btn" type="button" title="Shuffle">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
         </button>
-        <button id="np-prev" class="np-btn" type="button">
+        <button id="np-prev" class="np-btn" type="button" aria-label="Restart song; press twice quickly for previous song" title="Restart song; press twice quickly for previous song">
           <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
         </button>
         <button id="np-play" class="np-btn np-play-btn" type="button">
@@ -362,7 +364,7 @@
           <p id="mini-title" class="mini-title">No song</p>
           <p id="mini-artist" class="mini-artist">-</p>
         </div>
-        <div class="mini-controls"><button id="mini-prev" class="mini-play-btn" type="button" aria-label="Previous song"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M5 5h3v14H5zm14 0v14L9 12z"/></svg></button>
+        <div class="mini-controls"><button id="mini-prev" class="mini-play-btn" type="button" aria-label="Restart song; press twice quickly for previous song" title="Restart song; press twice quickly for previous song"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M5 5h3v14H5zm14 0v14L9 12z"/></svg></button>
         <button id="mini-play" aria-label="Play or pause" class="mini-play-btn" type="button">
           <svg id="mini-play-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
           <svg id="mini-pause-icon" class="hidden" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6zm8-14v14h4V5z"/></svg>
@@ -475,6 +477,6 @@
     <audio id="audio" preload="metadata"></audio>
     <aside id="toast" class="toast" role="status" aria-live="polite"></aside>
 
-    <script src="app.js?v=2026.10.23.4" type="module"></script>
+    <script src="app.js?v=2026.10.25.1" type="module"></script>
   </body>
 </html>

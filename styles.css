@@ -1150,3 +1150,35 @@ img.artwork-unavailable { visibility: hidden; }
 .playlist-chip span { min-width: 0; }
 .sheet { overflow-y: auto; overscroll-behavior: contain; }
 @media(max-width:360px) { .app-update-banner { align-items: stretch; flex-direction: column; } }
+
+/* Search stays readable on small phones and keeps artist identity explicit. */
+#search-mode { overflow-x: auto; }
+#search-mode .seg-btn { flex: 0 0 auto; }
+.search-section-title { margin: 22px 0 12px; color: var(--text); font-size: 16px; font-weight: 600; }
+.search-note, .search-status { color: var(--text-secondary); font-size: 13px; line-height: 1.6; padding: 16px 0; overflow-wrap: anywhere; }
+.search-status { color: #e5c2aa; }
+.search-artists { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 8px; }
+.search-artist { flex: 0 0 126px; display: flex; flex-direction: column; align-items: center; gap: 7px; border: 0; border-radius: 12px; background: #ffffff07; padding: 12px 8px; color: var(--text); font: inherit; cursor: pointer; }
+.search-artist img, .search-artist-placeholder { width: 72px; height: 72px; border-radius: 50%; object-fit: cover; background: #49392f; }
+.search-artist-placeholder { display: grid; place-items: center; font-size: 28px; }
+.search-artist strong { width: 100%; font-size: 13px; text-align: center; overflow-wrap: anywhere; }
+.search-artist > span:last-child { font-size: 11px; color: var(--text-secondary); }
+.search-local-song { display: block; width: 100%; text-align: left; border: 1px solid #ffffff12; border-radius: 10px; background: #ffffff05; color: var(--text); padding: 12px; margin: 6px 0; font: inherit; font-size: 13px; overflow-wrap: anywhere; cursor: pointer; }
+.search-back, .search-retry { margin: 10px 0; }
+.result-info { min-width: 0; }
+.result-info .title, .result-info .meta { overflow-wrap: anywhere; }
+.result-actions { display: flex; align-items: center; gap: 6px; }
+.search-preview { display: grid; place-items: center; flex-shrink: 0; width: 32px; height: 40px; border: 0; background: transparent; color: #e5c2aa; font-size: 18px; cursor: pointer; }
+@media (max-width: 360px) {
+  .result-item { grid-template-columns: 40px minmax(0, 1fr) auto; gap: 8px; padding-left: 8px; padding-right: 8px; }
+  .result-item .art { width: 40px; height: 40px; }
+  .result-actions { gap: 2px; }
+  .search-preview { width: 28px; }
+}
+
+#search-results .badge-row { flex-wrap: wrap; }
+
+.search-artists-compact .search-artist { flex: 0 0 180px; flex-direction: row; padding: 10px; }
+.search-artists-compact .search-artist img, .search-artists-compact .search-artist-placeholder { width: 32px; height: 32px; flex-shrink: 0; font-size: 18px; }
+.search-artists-compact .search-artist strong { width: auto; flex: 1; text-align: left; }
+.search-artists-compact .search-artist > span:last-child { display: none; }

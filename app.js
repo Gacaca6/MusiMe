@@ -1,4 +1,5 @@
-const APP_VERSION = "2026.10.23.4";
+import { normalizeSearch, searchMatch, rankSearchSongs, rankSearchArtists, dedupeSearchSongs, createSearchClient } from "./search-engine.js?v=2026.10.25.1";
+const APP_VERSION = "2026.10.25.1";
 const DB_NAME = "musime-db";
 const STORE_NAME = "songs";
 const SONGS_KEY = "musime-songs-meta";
@@ -891,112 +892,147 @@ function downloadUrlFor(result) {
 }
 
 // One JioSaavn song object -> our result shape (used by search AND albums)
+function remoteText(value, fallback = "") { return typeof value === "string" || typeof value === "number" ? decodeHtml(String(value)).slice(0, 500) : fallback; }
+function remoteUrl(value) { return typeof value === "string" && /^https?:\/\//i.test(value) ? value : ""; }
 function parseSaavnItem(item, extra = {}) {
-  const dl = item.downloadUrl || [];
-  const best = dl.length > 0 ? dl[dl.length - 1] : null; // highest quality (kept as fallback)
-  const art = (item.image || []).find((i) => i.quality === "500x500") || (item.image || [])[0];
+  item = item && typeof item === "object" ? item : {};
+  const dl = (Array.isArray(item.downloadUrl) ? item.downloadUrl.slice(0, 10) : []).filter((d) => d && remoteUrl(d.url)).map((d) => ({ quality: remoteText(d.quality), url: d.url }));
+  const artists = (Array.isArray(item.artists?.primary) ? item.artists.primary.slice(0, 30) : []).filter((a) => a && typeof a.name === "string");
+  const images = Array.isArray(item.image) ? item.image.slice(0, 10).filter(Boolean) : [];
+  const best = dl[dl.length - 1];
   return {
-    id: `saavn-${item.id}`,
-    saavnId: item.id || "", // raw JioSaavn id — stored on the song for re-download
-    title: decodeHtml(item.name || "Untitled"),
-    artist: decodeHtml((item.artists?.primary || []).map((a) => a.name).join(", ") || ""),
-    album: decodeHtml(item.album?.name || ""),
-    albumId: item.album?.id ? String(item.album.id) : "",
-    year: item.year ? String(item.year) : "",
-    artwork: art?.url || "",
-    source: "jiosaavn",
-    isPreview: false,
-    url: best?.url || "",
-    downloadUrls: dl, // every bitrate, so the Data Saver setting can choose
-    qualityHint: best?.quality || "",
-    duration: item.duration || 0,
+    id: `saavn-${remoteText(item.id)}`, saavnId: remoteText(item.id),
+    title: remoteText(item.name, "Untitled"), artist: artists.map((a) => remoteText(a.name)).join(", "),
+    artistIds: [...artists, ...(Array.isArray(item.artists?.featured) ? item.artists.featured.slice(0, 30).filter(Boolean) : [])].map((a) => remoteText(a.id)).filter(Boolean),
+    album: remoteText(item.album?.name), albumId: remoteText(item.album?.id), year: remoteText(item.year),
+    artwork: remoteUrl((images.find((i) => i.quality === "500x500") || images[images.length - 1])?.url),
+    source: "jiosaavn", isPreview: false, url: best?.url || "", downloadUrls: dl, qualityHint: best?.quality || "",
+    duration: Math.max(0, Math.min(86400, Number(item.duration) || 0)), playCount: Math.max(0, Number(item.playCount) || 0),
     ...extra,
   };
 }
-function parseSaavnResults(data) {
-  return (data?.data?.results || []).map((item) => parseSaavnItem(item)).filter((i) => i.url);
+function parseSearchSongs(items) {
+  return (Array.isArray(items) ? items : []).slice(0, 100).map((item) => parseSaavnItem(item)).filter((s) => s.saavnId && s.url);
 }
-
-async function fetchJioSaavnCandidates(query, page = 1) {
-  // Try the preferred mirror first, then the rest in order
-  const ordered = [saavnPreferredMirror, ...SAAVN_MIRRORS.filter((m) => m !== saavnPreferredMirror)];
-  let lastError = null;
-  for (const mirror of ordered) {
-    try {
-      const res = await fetch(`${mirror}/search/songs?query=${encodeURIComponent(query)}&limit=30&page=${page}`, {
-        // 8 second timeout per mirror so a slow mirror doesn't block the whole search
-        signal: AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined,
-      });
-      if (!res.ok) { lastError = new Error(`${mirror} returned ${res.status}`); continue; }
-      const data = await res.json();
-      const results = parseSaavnResults(data);
-      if (results.length > 0) {
-        rememberMirror(mirror); // remember the working one (persisted)
-        return results;
-      }
-      // Empty result — try the next mirror (unless we're paginating past the end)
-      if (page > 1) return [];
-    } catch (err) {
-      lastError = err;
-      // Try next mirror
-    }
-  }
-  if (lastError) throw lastError;
-  return [];
+const searchApi = createSearchClient({ mirrors: SAAVN_MIRRORS, preferred: () => saavnPreferredMirror, remember: rememberMirror });
+async function songSearchPage(query, page = 0, signal) {
+  const data = await searchApi(`/search/songs?query=${encodeURIComponent(query)}&limit=30&page=${page}`, { signal });
+  return { songs: parseSearchSongs(data.results), count: data.results.length, total: Math.max(0, Number(data.total) || 0) };
+}
+async function fetchJioSaavnCandidates(query, page = 0) {
+  return (await songSearchPage(query, page)).songs;
+}
+async function artistSearch(query, signal) {
+  const data = await searchApi(`/search/artists?query=${encodeURIComponent(query)}&limit=12&page=0`, { signal });
+  const seen = new Set();
+  return rankSearchArtists(data.results.filter((a) => a && a.id && typeof a.name === "string").map((a) => ({
+    id: remoteText(a.id), name: remoteText(a.name), image: remoteUrl(saavnImage(Array.isArray(a.image) ? a.image.filter(Boolean) : [], "150x150")),
+  })).filter((a) => { if (!a.id || !a.name || seen.has(a.id)) return false; seen.add(a.id); return true; }), query).slice(0, 8);
+}
+async function artistSongPage(artist, page, signal) {
+  const data = await searchApi(`/artists/${encodeURIComponent(artist.id)}/songs?page=${page}&sortBy=popularity&sortOrder=desc`, { signal, field: "songs" });
+  // An identity match must never be replaced by a different artist with a similar name.
+  const tracks = parseSearchSongs(data.songs).filter((s) => s.artistIds.includes(artist.id));
+  return { songs: tracks, count: data.songs.length, total: Math.max(0, Number(data.total) || 0) };
 }
 
 /* ══════════════ SEARCH ══════════════ */
-// Pagination state for "Load more" — reset on every new query.
-let searchState = { query: "", page: 1, more: false, loading: false };
-
-function dedupeResults(list) {
-  const seen = new Set();
-  return list.filter((i) => {
-    const k = `${i.title.toLowerCase()}|${(i.artist || "").toLowerCase()}`;
-    if (seen.has(k)) return false;
-    seen.add(k);
-    return true;
-  });
+const MAX_SEARCH_RESULTS = 120;
+let searchState = { query: "", page: 0, more: false, loading: false, artists: [], artist: null, error: "", notice: "" };
+function dedupeResults(list) { return dedupeSearchSongs(list); }
+function beginSearch(query, artist = null) {
+  searchState.controller?.abort();
+  clearTimeout(searchState.timer);
+  stopPreview();
+  remoteResults = []; remoteAlbums = [];
+  const state = { query, remoteQuery: query, mode: searchModeValue, page: 0, more: false, loading: true, artists: [], artist, catalog: null, error: "", notice: "", controller: new AbortController() };
+  searchState = state;
+  state.timer = setTimeout(() => { state.timedOut = true; state.controller.abort(); }, 18000);
+  return state;
 }
-
-async function searchRemoteSongs(query) {
-  const q = query.replace(/\s+/g, " ").trim();
-  if (!q) { remoteResults = []; searchState = { query: "", page: 1, more: false, loading: false }; renderRemoteResults(); return; }
-  searchState = { query: q, page: 1, more: false, loading: true };
-  // Inline searching state so the user isn't staring at stale results
-  nodes.searchResults.innerHTML = `<div class="empty-state"><div class="empty-icon">&#9835;</div><p>Searching&hellip;</p></div>`;
-  let batch = [];
-  try {
-    batch = await fetchJioSaavnCandidates(q, 1);
-  } catch {
-    batch = [];
+function currentSearch(state) { return searchState === state; }
+function mergeSearchSongs(state, list) {
+  remoteResults = rankSearchSongs(dedupeResults([...remoteResults, ...list]), state.query, state.catalog?.artist.id || state.artist?.id).slice(0, MAX_SEARCH_RESULTS);
+  remoteResults.forEach((r) => { r.query = state.query; });
+}
+async function searchRemoteSongs(state) {
+  const signal = state.controller.signal;
+  if (state.artist) {
+    const batch = await artistSongPage(state.artist, 0, signal);
+    if (!currentSearch(state)) return;
+    state.catalog = { artist: state.artist, page: 0, count: batch.count, total: batch.total };
+    mergeSearchSongs(state, batch.songs);
+    state.more = batch.count > 0 && batch.count < batch.total;
+    return;
   }
-  searchState.loading = false;
-  // A full page suggests more pages exist
-  searchState.more = batch.length >= 25;
-  remoteResults = dedupeResults(batch);
-  // Remember the query that surfaced each result — a cheap fallback re-download
-  // key if the saavnId ever stops resolving.
-  remoteResults.forEach((r) => { r.query = q; });
-  renderRemoteResults();
+  let songsOk = false, artistsOk = false, firstBatch;
+  const tasks = [songSearchPage(state.query, 0, signal).then((batch) => {
+    if (!currentSearch(state)) return;
+    songsOk = true; firstBatch = batch;
+    mergeSearchSongs(state, batch.songs);
+    state.more = batch.count >= 30 && (!batch.total || batch.total > batch.count);
+    renderRemoteResults();
+  }), artistSearch(state.query, signal).then((artists) => {
+    if (!currentSearch(state)) return;
+    artistsOk = true; state.artists = artists;
+    renderRemoteResults();
+  })];
+  await Promise.allSettled(tasks);
+  if (!currentSearch(state)) return;
+  if (!songsOk && !artistsOk) throw new Error("Search unavailable");
+  if (!songsOk || !artistsOk) state.notice = "Some results could not be loaded. Try again for more matches.";
+  const exact = state.artists.filter((a) => normalizeSearch(a.name) === normalizeSearch(state.query));
+  const crowdedTitle = firstBatch?.count >= 30 && remoteResults.filter((r) => normalizeSearch(r.title) === normalizeSearch(state.query)).length >= 8;
+  const titleAmbiguity = exact.length === 1 && remoteResults.some((r) => normalizeSearch(r.title) === normalizeSearch(state.query) && !r.artistIds.includes(exact[0].id));
+  if (exact.length === 1 && !titleAmbiguity && !signal.aborted) {
+    try {
+      const batch = await artistSongPage(exact[0], 0, signal);
+      if (!currentSearch(state)) return;
+      if (batch.songs.length) {
+        state.catalog = { artist: exact[0], page: 0, count: batch.count, total: batch.total };
+        mergeSearchSongs(state, batch.songs);
+        state.more = batch.count > 0 && batch.count < batch.total;
+      }
+    } catch { if (currentSearch(state)) state.notice = "Artist songs could not all be loaded. You can retry or preview the song matches below."; }
+  } else if (!signal.aborted && songsOk && (crowdedTitle || !remoteResults.some((r) => searchMatch(state.query, r.title) >= 750))) {
+    // One bounded expansion for weak matches or a crowded, ambiguous title.
+    const cleaned = normalizeSearch(state.query);
+    const cleanRetry = cleaned && cleaned !== state.query.toLowerCase();
+    if (firstBatch.count >= 30 || cleanRetry) {
+      try {
+        state.notice = "Looking for closer matches…"; renderRemoteResults();
+        const page = cleanRetry ? 0 : 1, query = cleanRetry ? cleaned : state.query;
+        const batch = await songSearchPage(query, page, signal);
+        if (!currentSearch(state)) return;
+        if (batch.songs.length) {
+          state.page = page; state.remoteQuery = query;
+          mergeSearchSongs(state, batch.songs);
+          state.more = batch.count >= 30 && (!batch.total || batch.total > (page + 1) * 30);
+        }
+        state.notice = !artistsOk ? "Artist matches are temporarily unavailable." : "";
+      } catch { if (currentSearch(state)) state.notice = "Showing available matches. Try again to search further."; }
+    }
+  }
 }
-
 async function loadMoreResults() {
-  if (searchState.loading || !searchState.more || !searchState.query) return;
-  searchState.loading = true;
-  renderRemoteResults(); // shows "Loading…" on the button
-  let batch = [];
-  try {
-    batch = await fetchJioSaavnCandidates(searchState.query, searchState.page + 1);
-  } catch {
-    batch = [];
-  }
-  searchState.page += 1;
-  searchState.loading = false;
-  searchState.more = batch.length >= 25;
-  batch.forEach((r) => { r.query = searchState.query; });
-  remoteResults = dedupeResults([...remoteResults, ...batch]);
+  const state = searchState;
+  if (state.loading || !state.more || !state.query || state.controller?.signal.aborted) return;
+  if (!navigator.onLine) { showToast("Connect to load more results"); return; }
+  stopPreview(); state.loading = true; state.notice = "";
   renderRemoteResults();
+  try {
+    const catalog = state.catalog;
+    const page = (catalog?.page ?? state.page) + 1;
+    const batch = catalog ? await artistSongPage(catalog.artist, page, state.controller.signal) : await songSearchPage(state.remoteQuery, page, state.controller.signal);
+    if (!currentSearch(state)) return;
+    const before = remoteResults.length;
+    mergeSearchSongs(state, batch.songs);
+    if (catalog) { catalog.page = page; catalog.count += batch.count; }
+    else state.page = page;
+    state.more = remoteResults.length > before && remoteResults.length < MAX_SEARCH_RESULTS && batch.count > 0 &&
+      (catalog ? catalog.count < batch.total : batch.count >= 30 && (!batch.total || batch.total > (page + 1) * 30));
+  } catch { if (currentSearch(state)) state.notice = "Could not load more songs. Your results are still here; tap Load more to retry."; }
+  finally { if (currentSearch(state)) { state.loading = false; renderRemoteResults(); } }
 }
 
 /* ══════════════ DOWNLOAD QUEUE ══════════════ */
@@ -1121,15 +1157,21 @@ async function fetchAudioBlob(url, onProgress) {
    download starts, or when another preview starts. */
 let previewAudio = null;
 let previewingId = null;
+let previewRequest = 0;
 const PREVIEW_MAX_SECONDS = 30;
 function stopPreview() {
+  previewRequest++;
   if (!previewAudio) return;
   try { previewAudio.pause(); } catch {}
   try { previewAudio.removeAttribute("src"); previewAudio.load(); } catch {}
   if (previewingId) {
     previewingId = null;
     refreshUpdateNotice();
-    document.querySelectorAll(".previewing").forEach((el) => el.classList.remove("previewing"));
+    document.querySelectorAll(".previewing").forEach((el) => {
+      el.classList.remove("previewing");
+      const button = el.querySelector(".search-preview");
+      if (button) { button.textContent = "▶"; button.setAttribute("aria-label", button.dataset.previewLabel); }
+    });
   }
 }
 function togglePreview(result, rowEl) {
@@ -1152,10 +1194,13 @@ function togglePreview(result, rowEl) {
   if (!nodes.audio.paused) { try { nodes.audio.pause(); } catch {} }
   previewingId = result.id;
   rowEl.classList.add("previewing");
+  const request = previewRequest;
+  const button = rowEl.querySelector(".search-preview");
+  if (button) { button.textContent = "■"; button.setAttribute("aria-label", `Stop preview of ${result.title}`); }
   // Previews stream at 96kbps — enough to recognise the song, a third of the data
   previewAudio.src = pickSaavnUrl(result.downloadUrls, "96kbps") || result.url;
   const p = previewAudio.play();
-  if (p && p.catch) p.catch((e) => { dbg(`preview rejected: ${e?.message || e}`); stopPreview(); showToast("Preview unavailable"); });
+  if (p && p.catch) p.catch((e) => { if (request !== previewRequest) return; dbg(`preview rejected: ${e?.message || e}`); stopPreview(); showToast("Preview unavailable"); });
   showToast("Previewing — tap again to stop");
 }
 // Never let a preview keep playing into the background / locked screen
@@ -1164,39 +1209,75 @@ document.addEventListener("visibilitychange", () => {
 });
 
 /* ══════════════ RENDER SEARCH RESULTS ══════════════ */
-function renderRemoteResults() {
-  nodes.searchResults.innerHTML = "";
-  if (!remoteResults.length) {
-    nodes.searchResults.innerHTML = `<div class="empty-state"><div class="empty-icon">&#9835;</div><p>No results found</p><p class="hint">Try a different search term</p></div>`;
-    return;
-  }
-  remoteResults.forEach((result) => {
-    const row = document.createElement("article"); row.className = "result-item";
-    // Search results use remote URLs (user is online to search)
-    const artEl = result.artwork ? `<img class="art" src="${escapeHtml(result.artwork)}" alt="" loading="lazy">` : `<div class="art placeholder"><span>&#9835;</span></div>`;
-    const src = result.source === "jiosaavn" ? "JioSaavn" : result.source;
-    const bc = result.isPreview ? "preview" : "full";
-    const bl = result.isPreview ? "Preview" : "Full";
-    // Show what the download will cost in data, at the user's chosen quality
-    const durLabel = result.duration > 0 ? `<span class="duration-label">${formatTime(result.duration)} &middot; &asymp; ${formatMB(estimateMB(result.duration))}</span>` : "";
-    row.innerHTML = `${artEl}<div class="result-info"><p class="title">${escapeHtml(result.title)}</p><p class="meta">${escapeHtml(result.artist || "Unknown")} &middot; ${escapeHtml(result.album || src)}</p><div class="badge-row"><span class="badge ${bc}">${bl} &middot; ${src}</span>${durLabel}</div></div><div class="result-actions"></div>`;
-    const btn = document.createElement("button"); btn.className = "add-btn"; btn.innerHTML = "+";
-    btn.addEventListener("click", (e) => { e.stopPropagation(); enqueueDownload(result); });
-    row.querySelector(".result-actions").append(btn);
-    // Tap the row to preview the song before downloading (tap again to stop)
-    row.addEventListener("click", () => togglePreview(result, row));
-    nodes.searchResults.append(row);
+function searchMessage(text, className = "search-note") {
+  const p = document.createElement("p"); p.className = className; p.textContent = text; return p;
+}
+function renderLocalSearch(box) {
+  if (!searchState.query || searchState.artist || searchState.mode === "albums") return;
+  const matches = rankSearchSongs(songs.filter((s) => isDownloaded(s) && Math.max(searchMatch(searchState.query, s.title), searchMatch(searchState.query, s.artist)) >= 750), searchState.query).slice(0, 5);
+  if (!matches.length) return;
+  box.append(searchMessage("On your device", "search-section-title"));
+  matches.forEach((s, i) => {
+    const button = document.createElement("button"); button.type = "button"; button.className = "search-local-song";
+    button.textContent = `${s.title} · ${s.artist || "Unknown artist"} · Downloaded`;
+    button.addEventListener("click", () => { stopPreview(); playCollection(null, matches, i, false); });
+    box.append(button);
   });
-  // "Load more" pagination — only when the last page came back full
-  if (searchState.more || searchState.loading) {
-    const more = document.createElement("button");
-    more.type = "button";
-    more.className = "pill-btn wide load-more-btn";
-    more.textContent = searchState.loading ? "Loading…" : "Load more results";
-    more.disabled = searchState.loading;
-    more.addEventListener("click", () => loadMoreResults());
-    nodes.searchResults.append(more);
+}
+function renderRemoteResults() {
+  const state = searchState, box = nodes.searchResults;
+  box.replaceChildren(); box.setAttribute("aria-busy", String(state.loading));
+  renderLocalSearch(box);
+  if (state.artist) {
+    const back = document.createElement("button"); back.type = "button"; back.className = "pill-btn search-back";
+    back.textContent = "‹ Back to results"; back.addEventListener("click", () => runSearch(state.query)); box.append(back);
+    box.append(searchMessage(`Songs by ${state.artist.name}`, "search-section-title"));
+  } else if ((state.mode === "all" || state.mode === "artists") && state.artists.length) {
+    box.append(searchMessage("Artists", "search-section-title"));
+    const list = document.createElement("div"); list.className = "search-artists";
+    list.classList.toggle("search-artists-compact", state.mode === "all" && !state.catalog && remoteResults.some((r) => normalizeSearch(r.title) === normalizeSearch(state.query)));
+    state.artists.forEach((artist) => {
+      const card = document.createElement("button"); card.type = "button"; card.className = "search-artist";
+      card.innerHTML = artist.image ? `<img src="${escapeHtml(artist.image)}" alt="" loading="lazy" decoding="async">` : `<span class="search-artist-placeholder">♫</span>`;
+      const name = document.createElement("strong"); name.textContent = artist.name;
+      const label = document.createElement("span"); label.textContent = "Artist · View songs"; card.append(name, label);
+      card.addEventListener("click", () => runSearch(state.query, artist)); list.append(card);
+    });
+    box.append(list);
   }
+  if (state.mode === "albums") renderRemoteAlbums(box);
+  else if (remoteResults.length) {
+    if (!state.artist) box.append(searchMessage("Songs · Tap to preview", "search-section-title"));
+    remoteResults.forEach((result) => {
+      const row = document.createElement("article"); row.className = "result-item"; row.dataset.saavnId = result.saavnId; row.dataset.title = result.title;
+      const art = result.artwork ? `<img class="art" src="${escapeHtml(result.artwork)}" alt="" loading="lazy" decoding="async">` : `<div class="art placeholder"><span>♫</span></div>`;
+      const have = haveSong(result);
+      const duration = result.duration > 0 ? `<span class="duration-label">${formatTime(result.duration)} · ≈ ${formatMB(estimateMB(result.duration))}</span>` : "";
+      row.innerHTML = `${art}<div class="result-info"><p class="title">${escapeHtml(result.title)}</p><p class="meta">${escapeHtml(result.artist || "Unknown artist")} · ${escapeHtml(result.album || "JioSaavn")}</p><div class="badge-row"><span class="badge full">${have ? "Downloaded" : "Full · JioSaavn"}</span>${duration}</div></div><div class="result-actions"></div>`;
+      const preview = document.createElement("button"); preview.type = "button"; preview.className = "search-preview";
+      preview.textContent = previewingId === result.id ? "■" : "▶"; preview.dataset.previewLabel = `Preview ${result.title} by ${result.artist || "Unknown artist"}`; preview.setAttribute("aria-label", previewingId === result.id ? `Stop preview of ${result.title}` : preview.dataset.previewLabel);
+      preview.addEventListener("click", (e) => { e.stopPropagation(); togglePreview(result, row); });
+      const add = document.createElement("button"); add.type = "button"; add.className = "add-btn"; add.textContent = have ? "✓" : "+";
+      add.setAttribute("aria-label", have ? `${result.title} is downloaded` : `Download ${result.title}`);
+      add.addEventListener("click", (e) => { e.stopPropagation(); enqueueDownload(result); });
+      row.querySelector(".result-actions").append(preview, add);
+      row.classList.toggle("previewing", previewingId === result.id);
+      row.addEventListener("click", () => togglePreview(result, row)); box.append(row);
+    });
+  }
+  const count = state.mode === "albums" ? remoteAlbums.length : remoteResults.length + ((state.mode === "all" || state.mode === "artists") ? state.artists.length : 0);
+  if (!count && !state.loading) box.append(searchMessage(state.error || (state.query ? "No results found. Try another spelling or search the artist." : "Search for any song or artist")));
+  if (state.loading) box.append(searchMessage(count ? "Finding more matches…" : "Searching…", "search-status"));
+  if (state.notice) box.append(searchMessage(state.notice));
+  if ((state.error || state.notice) && !state.loading && navigator.onLine) {
+    const retry = document.createElement("button"); retry.type = "button"; retry.className = "pill-btn search-retry"; retry.textContent = "Try again";
+    retry.addEventListener("click", () => runSearch(state.query, state.artist)); box.append(retry);
+  }
+  if (state.more && !state.loading && remoteResults.length < MAX_SEARCH_RESULTS) {
+    const more = document.createElement("button"); more.type = "button"; more.className = "pill-btn wide load-more-btn";
+    more.textContent = "Load more results"; more.addEventListener("click", () => loadMoreResults()); box.append(more);
+  }
+  if (remoteResults.length >= MAX_SEARCH_RESULTS) box.append(searchMessage("Showing the closest 120 matches. Add a word or choose an artist to narrow your search."));
 }
 
 /* ══════════════ LIBRARY ══════════════ */
@@ -1397,6 +1478,13 @@ function render() {
   renderHome();
   renderPlaylists(); renderRecent(); renderSongs();
   renderCollectionChip();
+  // Update only download badges; keep the current preview and keyboard focus.
+  document.querySelectorAll("#search-results .result-item").forEach((row) => {
+    const have = songs.some((s) => s.saavnId === row.dataset.saavnId && isDownloaded(s));
+    const button = row.querySelector(".add-btn"), badge = row.querySelector(".badge");
+    if (button) { button.textContent = have ? "✓" : "+"; button.setAttribute("aria-label", have ? `${row.dataset.title} is downloaded` : `Download ${row.dataset.title}`); }
+    if (badge) badge.textContent = have ? "Downloaded" : "Full · JioSaavn";
+  });
   if (libMode === "artists") renderCollection();
 }
 
@@ -1848,6 +1936,7 @@ async function playSong(song, startTime = 0) {
   nodes.audio.load();
   applyPlaybackSpeed();
   currentSongId = song.id;
+  resetPreviousPress();
   // DJ Mix: skip a silent intro (sync, in-memory lookup: no extra await before play)
   djAdvancedFor = null;
   currentDjProfile = djMode ? usableProfile(djProfiles.get(song.id)) : null;
@@ -2236,7 +2325,7 @@ function enforceTrackControls() {
   if (!("mediaSession" in navigator)) return;
   const ms = navigator.mediaSession;
   const set = (a, fn) => { try { ms.setActionHandler(a, fn); } catch {} };
-  set("previoustrack", () => { dbg("ACTION previoustrack"); playNext(-1); });
+  set("previoustrack", () => { dbg("ACTION previoustrack"); handlePrevious(); });
   set("nexttrack", () => { dbg("ACTION nexttrack"); playNext(1); });
   set("seekbackward", null);
   set("seekforward", null);
@@ -2304,7 +2393,42 @@ function togglePlayPause() {
   }
 }
 
+// A second Previous press within 800ms navigates; a lone press always replays.
+// Share the gesture across mini-player, full player, and lock-screen controls.
+const PREVIOUS_DOUBLE_PRESS_MS = 800;
+let previousPressAt = -Infinity;
+let previousPressSong = null;
+function resetPreviousPress() { previousPressAt = -Infinity; previousPressSong = null; }
+function handlePrevious() {
+  const song = songs.find((s) => s.id === currentSongId);
+  if (!song) return;
+  const now = performance.now();
+  if (previousPressSong === currentSongId && now - previousPressAt <= PREVIOUS_DOUBLE_PRESS_MS) {
+    resetPreviousPress();
+    playNext(-1);
+    return;
+  }
+  previousPressSong = currentSongId;
+  previousPressAt = now;
+  stopPreview();
+  if (!nodes.audio.src || nodes.audio.error || nodes.audio.readyState === 0) {
+    playSong(song);
+    return;
+  }
+  try { nodes.audio.currentTime = 0; }
+  catch { playSong(song); return; }
+  nodes.miniProgress.style.width = "0%";
+  nodes.npSeek.value = 0;
+  nodes.npCurrent.textContent = "0:00";
+  savePlaybackState(); // resume must not recover the old saved timestamp
+  updatePositionState(true);
+  updateLyricsHighlight(true);
+  updateFullProgress();
+  resumePlayback();
+}
+
 function playNext(direction = 1) {
+  resetPreviousPress();
   if (direction === 1 && userQueue.length > 0) {
     const next = userQueue.shift();
     renderNpQueue();
@@ -2445,7 +2569,7 @@ nodes.miniContent.addEventListener("click", () => {
 nodes.npClose.addEventListener("click", () => nodes.nowPlaying.classList.add("hidden"));
 nodes.npPlay.addEventListener("click", togglePlayPause);
 nodes.npNext.addEventListener("click", () => playNext(1));
-nodes.npPrev.addEventListener("click", () => playNext(-1));
+nodes.npPrev.addEventListener("click", handlePrevious);
 nodes.npSeek.addEventListener("input", () => { if (nodes.audio.duration) nodes.audio.currentTime = (nodes.npSeek.value / 100) * nodes.audio.duration; });
 
 /* ══════════════ SHUFFLE ══════════════ */
@@ -3153,7 +3277,13 @@ function signOutCloud() {
 }
 
 /* ══════════════ EVENT LISTENERS ══════════════ */
-nodes.searchForm.addEventListener("submit", async (e) => { e.preventDefault(); try { await runSearch(nodes.searchQuery.value); } catch { remoteResults = []; renderRemoteResults(); showToast("Search failed"); } });
+nodes.searchForm.addEventListener("submit", (e) => { e.preventDefault(); runSearch(nodes.searchQuery.value); });
+// Typing invalidates an in-flight submission immediately, even before Enter.
+nodes.searchQuery.addEventListener("input", () => {
+  if (searchState.loading || !nodes.searchQuery.value.trim()) {
+    const state = beginSearch(""); clearTimeout(state.timer); state.loading = false; renderRemoteResults();
+  }
+});
 nodes.urlForm.addEventListener("submit", async (e) => {
   e.preventDefault(); const url = nodes.songUrl.value.trim(); const title = nodes.songTitle.value.trim(); const artist = nodes.songArtist.value.trim();
   try { showToast("Downloading..."); const blob = await fetchAudioBlob(url, () => {}); await addSong({ title, artist, source: "web", blob, srcUrl: url }); nodes.urlForm.reset(); showToast("Saved offline"); } catch { showToast("Could not download"); }
@@ -3209,60 +3339,62 @@ function formatLong(sec) {
 }
 
 /* ══════════════ DISCOVER: ALBUM SEARCH ══════════════ */
-let searchModeValue = "songs";
+let searchModeValue = "all";
 let remoteAlbums = [];
 function setSearchMode(mode) {
+  if (!["all", "songs", "artists", "albums"].includes(mode)) return;
   searchModeValue = mode;
-  nodes.searchMode.querySelectorAll(".seg-btn").forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
-  nodes.searchQuery.placeholder = mode === "albums" ? "Search albums..." : "Search songs, artists...";
-  try { stopPreview(); } catch {}
-  const q = nodes.searchQuery.value.trim();
-  if (q) runSearch(q);
+  nodes.searchMode.querySelectorAll(".seg-btn").forEach((b) => {
+    const active = b.dataset.mode === mode; b.classList.toggle("active", active); b.setAttribute("aria-selected", String(active)); b.tabIndex = active ? 0 : -1;
+  });
+  nodes.searchQuery.placeholder = mode === "albums" ? "Search albums…" : mode === "artists" ? "Search artists…" : "Search songs, artists…";
+  runSearch(nodes.searchQuery.value);
 }
-async function runSearch(q) {
-  if (!navigator.onLine) {
-    nodes.searchResults.innerHTML = `<div class="empty-state"><p>You're offline</p><p class="hint">Connect to find new music. Your downloaded songs are ready in Home.</p></div>`;
-    return;
+async function runSearch(query, artist = null) {
+  const q = String(query || "").replace(/\s+/g, " ").trim().slice(0, 150);
+  const state = beginSearch(q, artist);
+  if (!q || !navigator.onLine) {
+    clearTimeout(state.timer); state.loading = false;
+    state.error = q ? "You're offline. Connect to find new music. Your downloaded songs are ready in Home." : "";
+    renderRemoteResults(); return;
   }
-  if (searchModeValue === "albums") return searchRemoteAlbums(q);
-  return searchRemoteSongs(q);
-}
-async function searchRemoteAlbums(query) {
-  const q = query.replace(/\s+/g, " ").trim();
-  if (!q) return;
-  nodes.searchResults.innerHTML = `<div class="empty-state"><div class="empty-icon">&#9835;</div><p>Searching albums&hellip;</p></div>`;
+  renderRemoteResults();
   try {
-    const data = await saavnGet(`/search/albums?query=${encodeURIComponent(q)}&limit=30`);
-    remoteAlbums = (data?.data?.results || []).map((a) => ({
-      id: String(a.id),
-      name: decodeHtml(a.name || "Album"),
-      artist: decodeHtml((a.artists?.primary || []).map((x) => x.name).join(", ") || a.description || ""),
-      year: a.year ? String(a.year) : "",
-      thumb: saavnImage(a.image, "150x150"), // small covers in the grid = little data
-      cover: saavnImage(a.image, "500x500"),
-    }));
-  } catch {
-    remoteAlbums = [];
+    if (artist) await searchRemoteSongs(state);
+    else if (state.mode === "albums") await searchRemoteAlbums(state);
+    else if (state.mode === "artists") {
+      const artists = await artistSearch(q, state.controller.signal);
+      if (currentSearch(state)) state.artists = artists;
+    } else await searchRemoteSongs(state);
+  } catch (error) {
+    if (currentSearch(state)) state.error = state.timedOut ? "Search took too long. Please try again." : "Search is temporarily unavailable. Please try again.";
+  } finally {
+    clearTimeout(state.timer);
+    if (currentSearch(state)) {
+      state.loading = false;
+      if (state.timedOut && (remoteResults.length || state.artists.length)) state.notice = "Showing available results. Try again to search further.";
+      renderRemoteResults();
+    }
   }
-  renderRemoteAlbums();
 }
-function renderRemoteAlbums() {
-  const box = nodes.searchResults;
-  box.innerHTML = "";
-  if (!remoteAlbums.length) {
-    box.innerHTML = `<div class="empty-state"><div class="empty-icon">&#9835;</div><p>No albums found</p><p class="hint">Try the artist's name</p></div>`;
-    return;
-  }
-  const grid = document.createElement("div");
-  grid.className = "album-grid";
+async function searchRemoteAlbums(state) {
+  const data = await searchApi(`/search/albums?query=${encodeURIComponent(state.query)}&limit=30&page=0`, { signal: state.controller.signal });
+  if (!currentSearch(state)) return;
+  remoteAlbums = data.results.filter((a) => a && a.id && typeof a.name === "string").slice(0, 30).map((a) => ({
+    id: remoteText(a.id), name: remoteText(a.name),
+    artist: remoteText((Array.isArray(a.artists?.primary) ? a.artists.primary : []).filter(Boolean).map((x) => remoteText(x.name)).join(", ") || a.description),
+    year: remoteText(a.year), thumb: remoteUrl(saavnImage(Array.isArray(a.image) ? a.image.filter(Boolean) : [], "150x150")),
+    cover: remoteUrl(saavnImage(Array.isArray(a.image) ? a.image.filter(Boolean) : [], "500x500")),
+  }));
+}
+function renderRemoteAlbums(box) {
+  if (!remoteAlbums.length) return;
+  const grid = document.createElement("div"); grid.className = "album-grid";
   remoteAlbums.forEach((a) => {
-    const card = document.createElement("button");
-    card.type = "button";
-    card.className = "album-card";
-    card.innerHTML = (a.thumb ? `<img class="cover" src="${escapeHtml(a.thumb)}" alt="" loading="lazy" decoding="async">` : `<div class="cover placeholder">&#9835;</div>`) +
+    const card = document.createElement("button"); card.type = "button"; card.className = "album-card";
+    card.innerHTML = (a.thumb ? `<img class="cover" src="${escapeHtml(a.thumb)}" alt="" loading="lazy" decoding="async">` : `<div class="cover placeholder">♫</div>`) +
       `<p class="name">${escapeHtml(a.name)}</p><p class="sub">${escapeHtml([a.artist, a.year].filter(Boolean).join(" · "))}</p>`;
-    card.addEventListener("click", () => openRemoteAlbum(a));
-    grid.append(card);
+    card.addEventListener("click", () => openRemoteAlbum(a)); grid.append(card);
   });
   box.append(grid);
 }
@@ -3663,6 +3795,15 @@ nodes.editForm.addEventListener("submit", (e) => {
 
 /* ══════════════ WIRING ══════════════ */
 nodes.searchMode.querySelectorAll(".seg-btn").forEach((b) => b.addEventListener("click", () => setSearchMode(b.dataset.mode)));
+nodes.searchMode.addEventListener("keydown", (event) => {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  const buttons = [...nodes.searchMode.querySelectorAll(".seg-btn")];
+  const index = buttons.indexOf(document.activeElement);
+  if (index < 0) return;
+  event.preventDefault();
+  const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + buttons.length) % buttons.length;
+  buttons[next].click(); buttons[next].focus();
+});
 nodes.libMode.querySelectorAll(".seg-btn").forEach((b) => b.addEventListener("click", () => setLibMode(b.dataset.mode)));
 nodes.apBack.addEventListener("click", closeAlbumPage);
 nodes.clearCollectionFilter.addEventListener("click", () => { collectionFilter = null; render(); renderNpQueue(); });
@@ -3948,7 +4089,7 @@ $("home-shuffle").addEventListener("click", () => {
   if (!list.length) return;
   playCollection(null, list, Math.floor(Math.random() * list.length), true);
 });
-$("mini-prev").addEventListener("click", (e) => { e.stopPropagation(); playNext(-1); });
+$("mini-prev").addEventListener("click", (e) => { e.stopPropagation(); handlePrevious(); });
 $("mini-next").addEventListener("click", (e) => { e.stopPropagation(); playNext(1); });
 
 

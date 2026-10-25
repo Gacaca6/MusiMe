@@ -1,8 +1,8 @@
-const APP_VERSION = "2026.10.23.4";
+const APP_VERSION = "2026.10.25.1";
 const CACHE_PREFIX = "musime-static-";
 const CACHE_NAME = `${CACHE_PREFIX}v27-${APP_VERSION}`;
 const STATIC_ASSETS = [
-  "./", "./index.html", `./styles.css?v=${APP_VERSION}`, `./app.js?v=${APP_VERSION}`,
+  "./", "./index.html", `./styles.css?v=${APP_VERSION}`, `./app.js?v=${APP_VERSION}`, `./search-engine.js?v=${APP_VERSION}`,
   "./manifest.webmanifest", "./icons/icon-192.svg", "./icons/icon-512.svg",
   "./icons/icon-180.png", "./icons/icon-192.png", "./icons/icon-512.png"
 ];
