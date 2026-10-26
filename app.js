@@ -1,5 +1,5 @@
-import { normalizeSearch, searchMatch, rankSearchSongs, rankSearchArtists, dedupeSearchSongs, createSearchClient } from "./search-engine.js?v=2026.10.25.1";
-const APP_VERSION = "2026.10.25.1";
+import { normalizeSearch, searchMatch, rankSearchSongs, rankSearchArtists, dedupeSearchSongs, createSearchClient } from "./search-engine.js?v=2026.10.26.1";
+const APP_VERSION = "2026.10.26.1";
 const DB_NAME = "musime-db";
 const STORE_NAME = "songs";
 const SONGS_KEY = "musime-songs-meta";
@@ -1018,6 +1018,7 @@ async function loadMoreResults() {
   const state = searchState;
   if (state.loading || !state.more || !state.query || state.controller?.signal.aborted) return;
   if (!navigator.onLine) { showToast("Connect to load more results"); return; }
+  if (state.mode === "albums") return loadMoreArtistAlbums(state);
   stopPreview(); state.loading = true; state.notice = "";
   renderRemoteResults();
   try {
@@ -1231,8 +1232,8 @@ function renderRemoteResults() {
   if (state.artist) {
     const back = document.createElement("button"); back.type = "button"; back.className = "pill-btn search-back";
     back.textContent = "‹ Back to results"; back.addEventListener("click", () => runSearch(state.query)); box.append(back);
-    box.append(searchMessage(`Songs by ${state.artist.name}`, "search-section-title"));
-  } else if ((state.mode === "all" || state.mode === "artists") && state.artists.length) {
+    box.append(searchMessage(`${state.mode === "albums" ? "Albums" : "Songs"} by ${state.artist.name}`, "search-section-title"));
+  } else if ((state.mode === "all" || state.mode === "artists" || state.mode === "albums") && state.artists.length) {
     box.append(searchMessage("Artists", "search-section-title"));
     const list = document.createElement("div"); list.className = "search-artists";
     list.classList.toggle("search-artists-compact", state.mode === "all" && !state.catalog && remoteResults.some((r) => normalizeSearch(r.title) === normalizeSearch(state.query)));
@@ -1240,7 +1241,7 @@ function renderRemoteResults() {
       const card = document.createElement("button"); card.type = "button"; card.className = "search-artist";
       card.innerHTML = artist.image ? `<img src="${escapeHtml(artist.image)}" alt="" loading="lazy" decoding="async">` : `<span class="search-artist-placeholder">♫</span>`;
       const name = document.createElement("strong"); name.textContent = artist.name;
-      const label = document.createElement("span"); label.textContent = "Artist · View songs"; card.append(name, label);
+      const label = document.createElement("span"); label.textContent = state.mode === "albums" ? "Artist · View albums" : "Artist · View songs"; card.append(name, label);
       card.addEventListener("click", () => runSearch(state.query, artist)); list.append(card);
     });
     box.append(list);
@@ -1265,8 +1266,8 @@ function renderRemoteResults() {
       row.addEventListener("click", () => togglePreview(result, row)); box.append(row);
     });
   }
-  const count = state.mode === "albums" ? remoteAlbums.length : remoteResults.length + ((state.mode === "all" || state.mode === "artists") ? state.artists.length : 0);
-  if (!count && !state.loading) box.append(searchMessage(state.error || (state.query ? "No results found. Try another spelling or search the artist." : "Search for any song or artist")));
+  const count = state.mode === "albums" ? remoteAlbums.length + state.artists.length : remoteResults.length + ((state.mode === "all" || state.mode === "artists") ? state.artists.length : 0);
+  if (!count && !state.loading) box.append(searchMessage(state.error || (state.mode === "albums" && state.artist ? "No albums are currently available for this artist." : state.query ? "No results found. Try another spelling or search the artist." : "Search for any song or artist")));
   if (state.loading) box.append(searchMessage(count ? "Finding more matches…" : "Searching…", "search-status"));
   if (state.notice) box.append(searchMessage(state.notice));
   if ((state.error || state.notice) && !state.loading && navigator.onLine) {
@@ -1275,7 +1276,7 @@ function renderRemoteResults() {
   }
   if (state.more && !state.loading && remoteResults.length < MAX_SEARCH_RESULTS) {
     const more = document.createElement("button"); more.type = "button"; more.className = "pill-btn wide load-more-btn";
-    more.textContent = "Load more results"; more.addEventListener("click", () => loadMoreResults()); box.append(more);
+    more.textContent = state.mode === "albums" ? "Load more albums" : "Load more results"; more.addEventListener("click", () => loadMoreResults()); box.append(more);
   }
   if (remoteResults.length >= MAX_SEARCH_RESULTS) box.append(searchMessage("Showing the closest 120 matches. Add a word or choose an artist to narrow your search."));
 }
@@ -3347,7 +3348,7 @@ function setSearchMode(mode) {
   nodes.searchMode.querySelectorAll(".seg-btn").forEach((b) => {
     const active = b.dataset.mode === mode; b.classList.toggle("active", active); b.setAttribute("aria-selected", String(active)); b.tabIndex = active ? 0 : -1;
   });
-  nodes.searchQuery.placeholder = mode === "albums" ? "Search albums…" : mode === "artists" ? "Search artists…" : "Search songs, artists…";
+  nodes.searchQuery.placeholder = mode === "albums" ? "Search albums or artists…" : mode === "artists" ? "Search artists…" : "Search songs, artists…";
   runSearch(nodes.searchQuery.value);
 }
 async function runSearch(query, artist = null) {
@@ -3360,8 +3361,8 @@ async function runSearch(query, artist = null) {
   }
   renderRemoteResults();
   try {
-    if (artist) await searchRemoteSongs(state);
-    else if (state.mode === "albums") await searchRemoteAlbums(state);
+    if (state.mode === "albums") await searchRemoteAlbums(state);
+    else if (artist) await searchRemoteSongs(state);
     else if (state.mode === "artists") {
       const artists = await artistSearch(q, state.controller.signal);
       if (currentSearch(state)) state.artists = artists;
@@ -3372,31 +3373,78 @@ async function runSearch(query, artist = null) {
     clearTimeout(state.timer);
     if (currentSearch(state)) {
       state.loading = false;
-      if (state.timedOut && (remoteResults.length || state.artists.length)) state.notice = "Showing available results. Try again to search further.";
+      if (state.timedOut && (remoteResults.length || state.artists.length || remoteAlbums.length)) state.notice = "Showing available results. Try again to search further.";
       renderRemoteResults();
     }
   }
 }
-async function searchRemoteAlbums(state) {
-  const data = await searchApi(`/search/albums?query=${encodeURIComponent(state.query)}&limit=30&page=0`, { signal: state.controller.signal });
-  if (!currentSearch(state)) return;
-  remoteAlbums = data.results.filter((a) => a && a.id && typeof a.name === "string").slice(0, 30).map((a) => ({
+function parseRemoteAlbums(items) {
+  return items.filter((a) => a && a.id && typeof a.name === "string").slice(0, 100).map((a) => ({
     id: remoteText(a.id), name: remoteText(a.name),
     artist: remoteText((Array.isArray(a.artists?.primary) ? a.artists.primary : []).filter(Boolean).map((x) => remoteText(x.name)).join(", ") || a.description),
     year: remoteText(a.year), thumb: remoteUrl(saavnImage(Array.isArray(a.image) ? a.image.filter(Boolean) : [], "150x150")),
     cover: remoteUrl(saavnImage(Array.isArray(a.image) ? a.image.filter(Boolean) : [], "500x500")),
-  }));
+  })).filter((a) => a.id && a.name);
 }
+async function artistAlbumPage(artist, page, signal) {
+  const data = await searchApi(`/artists/${encodeURIComponent(artist.id)}/albums?page=${page}&sortBy=latest&sortOrder=desc`, { signal, field: "albums" });
+  return { albums: parseRemoteAlbums(data.albums), count: data.albums.length, total: Math.max(0, Number(data.total) || 0) };
+}
+async function searchRemoteAlbums(state) {
+  const signal = state.controller.signal;
+  if (state.artist) {
+    const batch = await artistAlbumPage(state.artist, 0, signal);
+    if (!currentSearch(state)) return;
+    remoteAlbums = [...new Map(batch.albums.map((a) => [a.id, a])).values()];
+    state.albumCatalog = { page: 0, count: batch.count, total: batch.total };
+    state.more = batch.count > 0 && (batch.total ? batch.count < batch.total : batch.count >= 10);
+    return;
+  }
+  // Keep album-title matches while offering artist identity as a separate choice.
+  let albumsOk = false, artistsOk = false;
+  await Promise.allSettled([
+    searchApi(`/search/albums?query=${encodeURIComponent(state.query)}&limit=30&page=0`, { signal }).then((data) => {
+      if (!currentSearch(state)) return;
+      albumsOk = true; remoteAlbums = parseRemoteAlbums(data.results).slice(0, 30); renderRemoteResults();
+    }),
+    artistSearch(state.query, signal).then((artists) => {
+      if (!currentSearch(state)) return;
+      artistsOk = true; state.artists = artists; renderRemoteResults();
+    }),
+  ]);
+  if (!currentSearch(state)) return;
+  if (!albumsOk && !artistsOk) throw new Error("Album search unavailable");
+  if (!albumsOk || !artistsOk) state.notice = "Some album or artist matches could not be loaded. Try again for more results.";
+}
+async function loadMoreArtistAlbums(state) {
+  if (!state.artist || !state.albumCatalog) return;
+  state.loading = true; state.notice = ""; renderRemoteResults();
+  try {
+    const catalog = state.albumCatalog, page = catalog.page + 1;
+    const batch = await artistAlbumPage(state.artist, page, state.controller.signal);
+    if (!currentSearch(state)) return;
+    const before = remoteAlbums.length;
+    remoteAlbums = [...new Map([...remoteAlbums, ...batch.albums].map((a) => [a.id, a])).values()];
+    catalog.page = page; catalog.count += batch.count;
+    state.more = remoteAlbums.length > before && batch.count > 0 && (catalog.total ? catalog.count < catalog.total : batch.count >= 10);
+    // Keep a bounded grid while all loaded albums remain reachable by the pager.
+    state.albumViewPage = Math.floor(before / COLLECTION_PAGE_SIZE);
+  } catch { if (currentSearch(state)) state.notice = "Could not load more albums. Your albums are still here; tap Load more albums to retry."; }
+  finally { if (currentSearch(state)) { state.loading = false; renderRemoteResults(); } }
+}
+
 function renderRemoteAlbums(box) {
   if (!remoteAlbums.length) return;
   const grid = document.createElement("div"); grid.className = "album-grid";
-  remoteAlbums.forEach((a) => {
+  const page = clampPage(searchState.albumViewPage || 0, remoteAlbums.length);
+  remoteAlbums.slice(page * COLLECTION_PAGE_SIZE, (page + 1) * COLLECTION_PAGE_SIZE).forEach((a) => {
     const card = document.createElement("button"); card.type = "button"; card.className = "album-card";
     card.innerHTML = (a.thumb ? `<img class="cover" src="${escapeHtml(a.thumb)}" alt="" loading="lazy" decoding="async">` : `<div class="cover placeholder">♫</div>`) +
       `<p class="name">${escapeHtml(a.name)}</p><p class="sub">${escapeHtml([a.artist, a.year].filter(Boolean).join(" · "))}</p>`;
     card.addEventListener("click", () => openRemoteAlbum(a)); grid.append(card);
   });
   box.append(grid);
+  appendPager(box, page, remoteAlbums.length, (next) => { searchState.albumViewPage = next; renderRemoteResults(); nodes.searchResults.scrollIntoView({ block: "start" }); });
 }
 
 /* ══════════════ ALBUM / ARTIST PAGE ══════════════ */

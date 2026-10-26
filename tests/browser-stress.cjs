@@ -8,7 +8,7 @@ const pw = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root = path.resolve(__dirname, '..');
 const output = path.resolve(process.env.TEST_OUTPUT_DIR || path.join(root, 'test-results'));
 fs.mkdirSync(output, { recursive: true });
-const build = '2026.10.25.1';
+const build = '2026.10.26.1';
 const results = [];
 const browserResourceDiagnostics = [];
 let activeScenario = "";
@@ -138,6 +138,95 @@ async function submitSearch(page, query) {
 }
 async function searchSettled(page) { await page.waitForFunction(() => document.getElementById('search-results').getAttribute('aria-busy') === 'false'); }
 async function runFrontend() {
+  await check('album artist: correct identity, complete catalog pages, album detail and download', async () => {
+    const { context, page, errors } = await contextPage(process.env.TEST_BROWSER === 'webkit' ? { serviceWorkers: 'block' } : {});
+    const pages = [];
+    const album = (i) => ({ id: `album-${i}`, name: `Catalog album ${i}`, artists: { primary: [{ id: 'correct', name: 'Correct artist' }] }, image: [{ quality: '150x150', url: origin + '/art.svg' }] });
+    try {
+      await searchMock(context, (url) => {
+        if (url.pathname.endsWith('/search/artists')) return { json: { data: { results: [{ id: 'similar', name: 'Correct artist orchestra' }, { id: 'correct', name: 'Correct artist' }] } } };
+        if (url.pathname.endsWith('/search/albums')) return { json: { data: { results: [{ id: 'title-match', name: 'Direct album title' }] } } };
+        if (url.pathname.endsWith('/artists/correct/albums')) {
+          const p = Number(url.searchParams.get('page')); pages.push(p);
+          return { json: { data: { total: 5, albums: (p === 0 ? [0, 1] : [2, 3, 4]).map(album) } } };
+        }
+        if (url.pathname.endsWith('/albums')) return { json: { data: { name: 'Catalog album 0', songs: [searchSong('album-track', 'Catalog track', 'Correct artist', 'correct')] } } };
+        return;
+      });
+      await seed(page, []); await page.locator('[data-view="view-search"]').click(); await page.locator('#search-mode [data-mode="albums"]').click();
+      await page.locator('#search-query').fill('Correct artist'); await page.locator('#search-query').press('Enter'); await searchSettled(page);
+      assert.equal(await page.locator('.album-card').textContent(), '♫Direct album title');
+      await page.locator('.search-artist').filter({ has: page.getByText('Correct artist', { exact: true }) }).click(); await searchSettled(page);
+      assert.match(await page.locator('.search-section-title').textContent(), /Albums by Correct artist/);
+      assert.equal(await page.locator('.album-card').count(), 2);
+      await page.locator('.load-more-btn').click(); await searchSettled(page);
+      assert.equal(await page.locator('.album-card').count(), 5);
+      assert.deepEqual(pages, [0, 1]);
+      assert.equal(await page.locator('.load-more-btn').count(), 0);
+      await page.locator('.album-card').first().click(); await page.waitForFunction(() => document.querySelectorAll('#ap-tracks .ap-track').length === 1);
+      await page.locator('#ap-actions button').filter({ hasText: 'Download album' }).click();
+      await page.waitForFunction(() => JSON.parse(localStorage.getItem('musime-songs-meta') || '[]').some((s) => s.saavnId === 'album-track' && s.downloadedAsAlbum));
+      await noErrors(errors);
+    } finally { await context.close(); }
+  });
+  await check('album artist: retry retains albums; duplicate pages stop; empty catalogs and stale results stay safe', async () => {
+    const { context, page, errors } = await contextPage(process.env.TEST_BROWSER === 'webkit' ? { serviceWorkers: 'block' } : {});
+    let fail = true;
+    try {
+      await searchMock(context, async (url) => {
+        if (url.pathname.endsWith('/search/artists')) return { json: { data: { results: [{ id: 'a', name: 'Artist A' }, { id: 'empty', name: 'Artist Empty' }, { id: 'slow', name: 'Artist Slow' }] } } };
+        if (url.pathname.endsWith('/search/albums')) return { json: { data: { results: [{ id: 'fresh', name: 'Fresh title match' }] } } };
+        if (url.pathname.endsWith('/artists/empty/albums')) return { json: { data: { albums: [], total: 0 } } };
+        if (url.pathname.endsWith('/artists/slow/albums')) { await new Promise((r) => setTimeout(r, 600)); return { json: { data: { albums: [{ id: 'stale', name: 'Stale album' }], total: 1 } } }; }
+        if (url.pathname.endsWith('/artists/a/albums')) {
+          const p = Number(url.searchParams.get('page'));
+          if (p === 1 && fail) return { status: 503 };
+          return { json: { data: { albums: [{ id: 'saved', name: 'Keep this album' }], total: 5 } } };
+        }
+      });
+      await seed(page, []); await page.locator('[data-view="view-search"]').click(); await page.locator('#search-mode [data-mode="albums"]').click();
+      await page.locator('#search-query').fill('Artist'); await page.locator('#search-query').press('Enter'); await searchSettled(page);
+      await page.locator('.search-artist').filter({ hasText: 'Artist A' }).click(); await searchSettled(page);
+      await page.locator('.load-more-btn').click(); await searchSettled(page);
+      assert.match(await page.locator('#search-results').textContent(), /Could not load more albums/);
+      assert.equal(await page.locator('.album-card').count(), 1);
+      fail = false; await page.locator('.load-more-btn').click(); await searchSettled(page);
+      assert.equal(await page.locator('.album-card').count(), 1); assert.equal(await page.locator('.load-more-btn').count(), 0);
+      await page.locator('.search-back').click(); await searchSettled(page);
+      await page.locator('.search-artist').filter({ hasText: 'Artist Empty' }).click(); await searchSettled(page);
+      assert.match(await page.locator('#search-results').textContent(), /No albums are currently available/);
+      await page.locator('.search-back').click(); await searchSettled(page);
+      await page.locator('.search-artist').filter({ hasText: 'Artist Slow' }).click();
+      await page.locator('#search-query').fill('Fresh'); await page.locator('#search-query').press('Enter'); await searchSettled(page); await page.waitForTimeout(800);
+      assert.equal(await page.getByText('Stale album', { exact: true }).count(), 0);
+      assert.equal(await page.locator('.album-card .name').textContent(), 'Fresh title match');
+      await noErrors(errors);
+    } finally { await context.close(); }
+  });
+  await check('album artist: catalogs over 100 keep every loaded album reachable with bounded cards', async () => {
+    const { context, page, errors } = await contextPage(process.env.TEST_BROWSER === 'webkit' ? { serviceWorkers: 'block' } : {});
+    try {
+      await searchMock(context, (url) => {
+        if (url.pathname.endsWith('/search/artists')) return { json: { data: { results: [{ id: 'large', name: 'Large artist' }] } } };
+        if (url.pathname.endsWith('/artists/large/albums')) {
+          const p = Number(url.searchParams.get('page'));
+          return { json: { data: { total: 150, albums: Array.from({ length: 50 }, (_, i) => ({ id: `large-${p * 50 + i}`, name: `Album ${p * 50 + i}` })) } } };
+        }
+      });
+      await seed(page, []); await page.locator('[data-view="view-search"]').click(); await page.locator('#search-mode [data-mode="albums"]').click();
+      await page.locator('#search-query').fill('Large artist'); await page.locator('#search-query').press('Enter'); await searchSettled(page);
+      await page.locator('.search-artist').click(); await searchSettled(page);
+      await page.locator('.load-more-btn').click(); await searchSettled(page);
+      assert.equal(await page.locator('.album-card').count(), 100);
+      await page.locator('.load-more-btn').click(); await searchSettled(page);
+      assert.equal(await page.locator('.album-card').count(), 50);
+      assert.equal(await page.locator('.album-card .name').first().textContent(), 'Album 100');
+      await page.locator('#search-results .collection-pager button').first().click();
+      assert.equal(await page.locator('.album-card').count(), 100);
+      assert.equal(await page.locator('.album-card .name').first().textContent(), 'Album 0');
+      await noErrors(errors);
+    } finally { await context.close(); }
+  });
   await check('previous: single press replays; double press navigates across mini, full and media controls', async () => {
     const { context, page, errors } = await contextPage();
     try {
