@@ -1,6 +1,7 @@
-import { normalizeSearch, searchMatch, rankSearchSongs, rankSearchArtists, dedupeSearchSongs, createSearchClient } from "./search-engine.js?v=2026.11.06.2";
-import { readLocalTags, isLocalAudio, localAudioBlob, localCover } from "./local-import.js?v=2026.11.06.2";
-const APP_VERSION = "2026.11.06.2";
+import { normalizeSearch, searchMatch, rankSearchSongs, rankSearchArtists, dedupeSearchSongs, createSearchClient } from "./search-engine.js?v=2026.11.06.3";
+import { readLocalTags, isLocalAudio, localAudioBlob, localCover } from "./local-import.js?v=2026.11.06.3";
+import { userLyrics, lyricStamp } from "./lyrics-tools.js?v=2026.11.06.3";
+const APP_VERSION = "2026.11.06.3";
 const DB_NAME = "musime-db";
 const STORE_NAME = "songs";
 const SONGS_KEY = "musime-songs-meta";
@@ -435,6 +436,7 @@ async function cacheArtworkFromUrl(songId, url) {
     if (!res.ok) return;
     const blob = await res.blob();
     if (blob.size > 0) {
+      if (songs.find((song) => song.id === songId)?.customArtwork === true) return;
       await saveArtwork(songId, blob);
       // Create object URL for immediate use
       rememberArtwork(songId, blob);
@@ -493,8 +495,21 @@ const LRCLIB_BASE = "https://lrclib.net/api";
 let currentLyrics = null;   // { synced: [{t,text}]|null, plain: string|null } for the current song
 let activeLyricLine = -1;
 
-async function saveLyrics(songId, obj) {
-  await saveBlob(`lyr-${songId}`, new Blob([JSON.stringify(obj)], { type: "application/json" }));
+const lyricsWrites = new Map();
+async function saveLyrics(songId, obj, automatic = false) {
+  // Serialize per song. A slow provider must never overwrite pasted lyrics.
+  const write = (lyricsWrites.get(songId) || Promise.resolve()).catch(() => {}).then(async () => {
+    if (!songs.some((song) => song.id === songId)) throw new Error("This song has been removed.");
+    if (automatic) {
+      const existing = await getLyricsRecord(songId);
+      if (existing?.source === "user") return existing;
+    }
+    await saveBlob(`lyr-${songId}`, new Blob([JSON.stringify(obj)], { type: "application/json" }));
+    return obj;
+  });
+  lyricsWrites.set(songId, write);
+  try { return await write; }
+  finally { if (lyricsWrites.get(songId) === write) lyricsWrites.delete(songId); }
 }
 async function getLyricsRecord(songId) {
   try {
@@ -572,7 +587,7 @@ async function ensureLyricsCached(song) {
   // Cache negative results too (as {none:true}) so we don't re-query every time;
   // migrateLyrics skips entries that exist in any form.
   const record = fetched ? fetched : { none: true };
-  try { await saveLyrics(song.id, record); } catch {}
+  try { return await saveLyrics(song.id, record, true); } catch {}
   return fetched;
 }
 
@@ -582,7 +597,7 @@ function parseLrc(lrc) {
   for (const line of lrc.split("\n")) {
     const matches = [...line.matchAll(/\[(\d+):(\d+(?:\.\d+)?)\]/g)];
     if (!matches.length) continue;
-    const text = line.replace(/\[[^\]]*\]/g, "").trim();
+    const text = line.replace(/^(?:\s*\[\d+:\d+(?:\.\d+)?\])+/, "").trim();
     for (const m of matches) {
       const t = parseInt(m[1], 10) * 60 + parseFloat(m[2]);
       if (isFinite(t)) out.push({ t, text });
@@ -596,7 +611,9 @@ function parseLrc(lrc) {
 // feature get their lyrics: play them once with internet and they're saved
 // for offline forever.
 const lyricsRetriedThisSession = new Set();
+let lyricsLoadVersion = 0;
 async function loadLyricsForCurrent(song) {
+  const version = ++lyricsLoadVersion;
   currentLyrics = null;
   activeLyricLine = -1;
   renderLyricsPanel(); // hide the card immediately while we load (no stale lyrics)
@@ -609,10 +626,10 @@ async function loadLyricsForCurrent(song) {
     const fetched = await fetchLyricsAny(song);
     if (fetched || !rec) {
       rec = fetched ? fetched : { none: true };
-      try { await saveLyrics(song.id, rec); } catch {}
+      try { rec = await saveLyrics(song.id, rec, true); } catch {}
     }
   }
-  if (song.id !== currentSongId) return; // song changed while we were loading
+  if (song.id !== currentSongId || version !== lyricsLoadVersion) return;
   if (rec && !rec.none && (rec.syncedLyrics || rec.plainLyrics)) {
     currentLyrics = {
       synced: rec.syncedLyrics ? parseLrc(rec.syncedLyrics) : null,
@@ -626,7 +643,7 @@ async function loadLyricsForCurrent(song) {
 // Render the lyrics card below the player. Spotify pattern: the card only
 // exists when there ARE lyrics — nobody is forced to look at empty states;
 // you discover it by scrolling down.
-const LYRICS_SOURCE_LABEL = { lrclib: "LRCLIB", jiosaavn: "JioSaavn" };
+const LYRICS_SOURCE_LABEL = { lrclib: "LRCLIB", jiosaavn: "JioSaavn", user: "You" };
 let cardLineEls = [];
 let fullLineEls = [];
 let lfUserScrollUntil = 0; // pause auto-follow while the user reads/scrolls
@@ -686,15 +703,17 @@ function renderFullLyrics() {
   fullLineEls = buildLyricsInto(box, true);
   const attrib = document.createElement("p");
   attrib.className = "lf-attrib";
-  attrib.textContent = `Lyrics provided by ${LYRICS_SOURCE_LABEL[currentLyrics.source] || "LRCLIB"} · saved on your phone for offline`;
+  attrib.textContent = currentLyrics.source === "user" ? "Lyrics added by you · saved offline on this device" : `Lyrics provided by ${LYRICS_SOURCE_LABEL[currentLyrics.source] || "LRCLIB"} · saved on your phone for offline`;
   box.append(attrib);
+  const edit = document.createElement("button"); edit.type = "button"; edit.className = "pill-btn"; edit.textContent = "Add / edit lyrics";
+  edit.addEventListener("click", () => openLyricsEditor(currentSongId)); box.append(edit);
 }
 
 function isFullLyricsOpen() { return nodes.lyricsFull && !nodes.lyricsFull.classList.contains("hidden"); }
 
 function openFullLyrics() {
   if (!currentLyrics || !(currentLyrics.synced?.length || currentLyrics.plain)) {
-    showToast(navigator.onLine ? "No lyrics found for this song" : "No lyrics saved — play this song online once to fetch them");
+    if (currentSongId) openLyricsEditor(currentSongId);
     return;
   }
   nodes.lfTitle.textContent = nodes.npTitle.textContent;
@@ -708,11 +727,215 @@ function openFullLyrics() {
 }
 function closeFullLyrics() { nodes.lyricsFull.classList.add("hidden"); }
 
+let lyricsEditorState = null;
+let songCoverState = null;
+function editorMessage(message) { $("lyrics-editor-status").textContent = message; }
+function closeLyricsEditor() {
+  if (lyricsEditorState?.busy || lyricsEditorState?.starting) return;
+  const trigger = lyricsEditorState?.trigger;
+  lyricsEditorState = null;
+  $("lyrics-editor").classList.add("hidden");
+  refreshUpdateNotice();
+  if (trigger?.isConnected) trigger.focus();
+}
+async function openLyricsEditor(id) {
+  const song = songs.find((s) => s.id === id);
+  if (!song || lyricsEditorState?.busy || lyricsEditorState?.starting) return;
+  const state = lyricsEditorState = { id, trigger: document.activeElement, busy: false, loading: true, starting: false, sync: null };
+  $("lyrics-editor-song").textContent = `${song.title} · ${song.artist || "Unknown artist"}`;
+  $("lyrics-editor-text").value = ""; $("lyrics-editor-text").readOnly = true;
+  $("lyrics-editor-save").disabled = true; $("lyrics-editor-save").textContent = "Save lyrics";
+  $("lyrics-sync-start").textContent = "Sync while listening";
+  $("lyrics-editor-preview").classList.add("hidden"); $("lyrics-sync-panel").classList.add("hidden");
+  $("lyrics-editor").classList.remove("hidden"); $("lyrics-editor-close").focus();
+  editorMessage("Loading saved lyrics…"); refreshUpdateNotice();
+  const record = await getLyricsRecord(id);
+  if (lyricsEditorState !== state) return;
+  $("lyrics-editor-text").value = record?.syncedLyrics || record?.plainLyrics || "";
+  $("lyrics-editor-text").readOnly = false; $("lyrics-editor-save").disabled = false;
+  state.loading = false; editorMessage("Saved only to this song. Available offline.");
+}
+function renderLyricsSync() {
+  const state = lyricsEditorState, sync = state?.sync;
+  if (!sync) return;
+  const next = sync.times.length, sameSong = currentSongId === state.id;
+  $("lyrics-sync-count").textContent = `${next} of ${sync.lines.length} lines timed`;
+  $("lyrics-sync-line").textContent = sync.lines[next] || "Every line is ready. Save your synced lyrics.";
+  $("lyrics-sync-mark").disabled = !sameSong || next === sync.lines.length;
+  $("lyrics-sync-undo").disabled = !next;
+  $("lyrics-editor-save").textContent = next === sync.lines.length ? "Save synced lyrics" : "Save plain lyrics";
+  const duration = Number.isFinite(nodes.audio.duration) ? nodes.audio.duration : 0;
+  $("lyrics-sync-seek").max = String(duration || 1);
+  $("lyrics-sync-seek").disabled = !sameSong || !duration;
+  $("lyrics-sync-seek").value = String(sameSong ? nodes.audio.currentTime || 0 : 0);
+  $("lyrics-sync-time").textContent = sameSong ? formatTime(nodes.audio.currentTime || 0) : "Song changed — restart syncing";
+}
+$("lyrics-editor-close").addEventListener("click", closeLyricsEditor);
+$("lyrics-editor-cancel").addEventListener("click", closeLyricsEditor);
+$("lyrics-editor").addEventListener("click", (e) => { if (e.target === $("lyrics-editor")) closeLyricsEditor(); });
+$("lyrics-editor").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { e.preventDefault(); closeLyricsEditor(); }
+  if (e.key === "Tab") {
+    const controls = [...$("lyrics-editor").querySelectorAll("button:not(:disabled), textarea, input:not(:disabled)")].filter((el) => el.getClientRects().length);
+    const first = controls[0], last = controls[controls.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  }
+});
+$("lyrics-editor-text").addEventListener("input", () => {
+  $("lyrics-editor-preview").classList.add("hidden");
+  editorMessage("Changes haven't been saved yet.");
+});
+$("lyrics-editor-preview-btn").addEventListener("click", () => {
+  if (!lyricsEditorState || lyricsEditorState.loading) return;
+  try {
+    const record = userLyrics($("lyrics-editor-text").value);
+    const preview = $("lyrics-editor-preview"); preview.replaceChildren();
+    record.plainLyrics.split("\n").forEach((line) => { const p = document.createElement("p"); p.textContent = line || "\u00a0"; preview.append(p); });
+    preview.classList.remove("hidden"); preview.scrollIntoView({ block: "nearest" });
+    editorMessage(record.syncedLyrics ? "Timestamped lyrics · lines will follow playback." : "Plain lyrics · readable offline without automatic highlighting.");
+  } catch (error) { editorMessage(error.message); }
+});
+$("lyrics-sync-start").addEventListener("click", async () => {
+  const state = lyricsEditorState;
+  if (!state || state.loading || state.busy || state.starting) return;
+  try {
+    const record = userLyrics($("lyrics-editor-text").value), plain = record.plainLyrics;
+    const song = songs.find((s) => s.id === state.id);
+    if (!song) throw new Error("This song has been removed.");
+    state.starting = true; $("lyrics-editor-save").disabled = true;
+    editorMessage("Starting your song from the beginning…");
+    await playSong(song);
+    if (lyricsEditorState !== state) return;
+    if (currentSongId !== state.id || !nodes.audio.src) throw new Error("Import the song's audio before syncing lyrics.");
+    try { nodes.audio.currentTime = 0; } catch {}
+    state.sync = { lines: plain.split("\n").filter((line) => line.trim()), times: [] };
+    $("lyrics-editor-text").value = plain; $("lyrics-editor-text").readOnly = true;
+    $("lyrics-editor-preview").classList.add("hidden");
+    $("lyrics-sync-panel").classList.remove("hidden"); $("lyrics-sync-start").textContent = "Restart syncing";
+    renderLyricsSync(); $("lyrics-sync-panel").scrollIntoView({ block: "nearest" });
+    editorMessage("Tap Mark this line now when each line begins. Use Play / pause if playback hasn't started.");
+  } catch (error) { editorMessage(error.message || "Could not start syncing."); }
+  finally { state.starting = false; if (lyricsEditorState === state) $("lyrics-editor-save").disabled = false; }
+});
+$("lyrics-sync-mark").addEventListener("click", () => {
+  const state = lyricsEditorState, sync = state?.sync;
+  if (!sync || currentSongId !== state.id || sync.times.length >= sync.lines.length) return;
+  const time = nodes.audio.currentTime;
+  if (!Number.isFinite(time) || time < (sync.times.at(-1) || 0)) { editorMessage("Seek after the previous line, or undo its timing first."); return; }
+  sync.times.push(time); renderLyricsSync();
+  editorMessage(sync.times.length === sync.lines.length ? "All lines timed. Save synced lyrics to finish." : `Marked ${lyricStamp(time)}. Next line ready.`);
+});
+$("lyrics-sync-undo").addEventListener("click", () => { lyricsEditorState?.sync?.times.pop(); renderLyricsSync(); });
+$("lyrics-sync-play").addEventListener("click", () => {
+  if (lyricsEditorState?.id !== currentSongId) { editorMessage("The song changed. Restart syncing to continue."); return; }
+  togglePlayPause();
+});
+$("lyrics-sync-seek").addEventListener("input", (e) => { if (lyricsEditorState?.id === currentSongId) { try { nodes.audio.currentTime = Number(e.target.value); } catch {} } });
+nodes.audio.addEventListener("timeupdate", () => { if (lyricsEditorState?.sync) renderLyricsSync(); });
+$("lyrics-editor-save").addEventListener("click", async () => {
+  const state = lyricsEditorState;
+  if (!state || state.loading || state.busy || state.starting) return;
+  try {
+    const sync = state.sync;
+    const record = userLyrics($("lyrics-editor-text").value, sync && sync.times.length === sync.lines.length ? sync.times : null);
+    state.busy = true; $("lyrics-editor-save").disabled = true; $("lyrics-editor-text").readOnly = true;
+    editorMessage("Saving lyrics on this device…");
+    await saveLyrics(state.id, record);
+    const song = songs.find((s) => s.id === state.id);
+    if (currentSongId === state.id && song) await loadLyricsForCurrent(song);
+    state.busy = false; closeLyricsEditor(); showToast(record.syncedLyrics ? "Synced lyrics saved offline" : "Lyrics saved offline");
+  } catch (error) { editorMessage(error?.name === "QuotaExceededError" ? "Storage is full. Free space, then try saving again. Your text is still here." : error.message || "Could not save lyrics. Your text is still here."); }
+  finally { state.busy = false; if (lyricsEditorState === state) { $("lyrics-editor-save").disabled = false; $("lyrics-editor-text").readOnly = !!state.sync; } }
+});
+
 function syncFullPlayIcon() {
   if (!nodes.lfPlayIcon) return;
   nodes.lfPlayIcon.classList.toggle("hidden", isPlaying);
   nodes.lfPauseIcon.classList.toggle("hidden", !isPlaying);
 }
+
+function closeSongCover() {
+  if (songCoverState?.busy) return;
+  const trigger = songCoverState?.trigger;
+  if (songCoverState?.url) URL.revokeObjectURL(songCoverState.url);
+  songCoverState = null; $("song-cover-sheet").classList.add("hidden"); $("song-cover-file").value = "";
+  refreshUpdateNotice(); if (trigger?.isConnected) trigger.focus();
+}
+async function openSongCover(id) {
+  const song = songs.find((s) => s.id === id);
+  if (!song || songCoverState?.busy) return;
+  const state = songCoverState = { id, trigger: document.activeElement, blob: null, url: null, version: 0, busy: false };
+  $("song-cover-song").textContent = `${song.title} · ${song.artist || "Unknown artist"}`;
+  $("song-cover-image").classList.add("hidden"); $("song-cover-image").removeAttribute("src");
+  $("song-cover-file").value = ""; $("song-cover-file").disabled = false; $("song-cover-auto").disabled = false;
+  $("song-cover-save").disabled = true; $("song-cover-status").textContent = "Choose your cover. The original stays until you save.";
+  $("song-cover-sheet").classList.remove("hidden"); $("song-cover-close").focus(); refreshUpdateNotice();
+  await loadArtwork(id);
+  if (songCoverState !== state || state.version) return;
+  const url = getArtUrl(song);
+  if (url) { $("song-cover-image").src = url; $("song-cover-image").classList.remove("hidden"); }
+}
+async function prepareSongCover(file = null) {
+  const state = songCoverState;
+  if (!state || state.busy) return;
+  const version = ++state.version;
+  const song = songs.find((s) => s.id === state.id);
+  if (!song) return;
+  state.blob = null; $("song-cover-save").disabled = true; $("song-cover-status").textContent = "Preparing your cover…";
+  try {
+    const blob = await localCover(song.title, file);
+    if (songCoverState !== state || version !== state.version) return;
+    if (state.url) URL.revokeObjectURL(state.url);
+    state.blob = blob; state.url = URL.createObjectURL(blob);
+    $("song-cover-image").src = state.url; $("song-cover-image").classList.remove("hidden");
+    $("song-cover-save").disabled = false; $("song-cover-status").textContent = "Looking good. Save this cover to keep it offline.";
+  } catch (error) { if (songCoverState === state && version === state.version) $("song-cover-status").textContent = error.message || "Could not open this image. Try another one."; }
+}
+$("song-cover-file").addEventListener("change", (e) => { const file = e.target.files?.[0]; if (file) prepareSongCover(file); });
+$("song-cover-choose").addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); if (!songCoverState?.busy) $("song-cover-file").click(); } });
+$("song-cover-auto").addEventListener("click", () => prepareSongCover());
+$("song-cover-close").addEventListener("click", closeSongCover);
+$("song-cover-cancel").addEventListener("click", closeSongCover);
+$("song-cover-sheet").addEventListener("click", (e) => { if (e.target === $("song-cover-sheet")) closeSongCover(); });
+$("song-cover-sheet").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { e.preventDefault(); closeSongCover(); }
+  if (e.key === "Tab") {
+    const buttons = [...$("song-cover-sheet").querySelectorAll("button:not(:disabled), label[tabindex]")];
+    const first = buttons[0], last = buttons[buttons.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  }
+});
+$("song-cover-save").addEventListener("click", async () => {
+  const state = songCoverState, song = songs.find((s) => s.id === state?.id);
+  if (!state?.blob || state.busy || !song) return;
+  state.busy = true; $("song-cover-save").disabled = true; $("song-cover-file").disabled = true; $("song-cover-auto").disabled = true;
+  $("song-cover-status").textContent = "Saving cover on this device…";
+  const oldFlag = song.customArtwork;
+  let oldBlob, written = false;
+  try {
+    oldBlob = await getArtwork(song.id); song.customArtwork = true;
+    await saveArtwork(song.id, state.blob); written = true;
+    if (!saveMeta()) throw new Error("Could not save cover information. Free some device storage and try again.");
+    const url = rememberArtwork(song.id, state.blob); failedArtwork.delete(song.id); albumColorCache.delete(song.id);
+    render();
+    if (currentSongId === song.id) {
+      nodes.miniArt.src = url; nodes.miniArt.classList.remove("hidden"); nodes.miniArtPlaceholder.classList.add("hidden");
+      nodes.npArtwork.src = url; nodes.npArtwork.classList.remove("hidden"); nodes.npArtworkPlaceholder.classList.add("hidden");
+      try { updateMediaSession(song, url, true); } catch {}
+      applyAlbumColor(song).catch(() => {});
+    }
+    state.busy = false; closeSongCover(); showToast("Cover saved offline");
+  } catch (error) {
+    song.customArtwork = oldFlag;
+    if (written) { try { if (oldBlob) await saveArtwork(song.id, oldBlob); else await deleteArtwork(song.id); } catch {} }
+    $("song-cover-status").textContent = error?.name === "QuotaExceededError" ? "Storage is full. Free space and try saving again. Your current cover is unchanged." : error.message || "Could not save this cover. Try again.";
+  } finally {
+    state.busy = false;
+    if (songCoverState === state) { $("song-cover-save").disabled = false; $("song-cover-file").disabled = false; $("song-cover-auto").disabled = false; }
+  }
+});
 function updateFullProgress() {
   if (!isFullLyricsOpen()) return;
   const { currentTime, duration } = nodes.audio;
@@ -2704,6 +2927,8 @@ function openSongActions(song) {
     [song.favorite ? "Remove from favorites" : "Add to favorites", () => toggleFavorite(song.id)],
     ["Add to playlist", () => addSongToPlaylist(song.id)],
     ["Edit song info", () => openEditSheet(song.id)],
+    ["Add / edit lyrics", () => openLyricsEditor(song.id)],
+    ["Change cover", () => openSongCover(song.id)],
     ["Remove download", () => removeSong(song.id)],
   ];
   options.forEach(([label, action]) => {
@@ -3300,6 +3525,8 @@ nodes.urlForm.addEventListener("submit", async (e) => {
   try { showToast("Downloading..."); const blob = await fetchAudioBlob(url, () => {}); await addSong({ title, artist, source: "web", blob, srcUrl: url }); nodes.urlForm.reset(); showToast("Saved offline"); } catch { showToast("Could not download"); }
 });
 let deviceImportBusy = false;
+let importCoverPreviewUrl = null;
+$("import-add-lyrics").addEventListener("click", () => openLyricsEditor($("import-add-lyrics").dataset.songId));
 const deviceAudioTypes = nodes.fileInput.accept;
 $("import-show-all").addEventListener("change", (e) => {
   if (e.target.checked) nodes.fileInput.removeAttribute("accept");
@@ -3307,6 +3534,10 @@ $("import-show-all").addEventListener("change", (e) => {
 });
 $("import-cover-input").addEventListener("change", (e) => {
   const file = e.target.files?.[0];
+  if (importCoverPreviewUrl) { URL.revokeObjectURL(importCoverPreviewUrl); importCoverPreviewUrl = null; }
+  const preview = $("import-cover-preview"); preview.classList.toggle("hidden", !file);
+  if (file) { importCoverPreviewUrl = URL.createObjectURL(file); preview.src = importCoverPreviewUrl; }
+  else preview.removeAttribute("src");
   $("import-cover-name").textContent = file ? `${file.name} — used for all songs in this import.` : "Uses embedded artwork, or creates a cover automatically.";
   $("clear-import-cover").classList.toggle("hidden", !file);
 });
@@ -3322,8 +3553,10 @@ nodes.fileInput.addEventListener("change", async (e) => {
   const coverInput = $("import-cover-input"), status = $("device-import-status");
   const selectedCover = coverInput.files?.[0];
   let imported = 0, failed = 0, coverFailed = 0;
+  let lastImportedId = null;
   const failures = [];
   deviceImportBusy = true; nodes.fileInput.disabled = true; coverInput.disabled = true;
+  $("import-add-lyrics").classList.add("hidden");
   $("clear-import-cover").disabled = true;
   $("import-show-all").disabled = true;
   status.setAttribute("aria-busy", "true"); refreshUpdateNotice();
@@ -3348,6 +3581,7 @@ nodes.fileInput.addEventListener("change", async (e) => {
         catch { tags = { title: file.name.replace(/\.[^.]+$/, ""), artist: "", cover: null }; }
         // The File is stored directly, without reading/base64-encoding its audio.
         const id = await addSong({ title: tags.title, artist: tags.artist, source: "device", blob: localAudioBlob(file) });
+        lastImportedId = id;
         imported++;
         try {
           let cover = customCover;
@@ -3361,6 +3595,11 @@ nodes.fileInput.addEventListener("change", async (e) => {
       }
     }
     status.textContent = `${imported} song${imported === 1 ? "" : "s"} imported to Home.${failed ? ` ${failed} failed. ${failures.join(" ")}` : ""}${coverFailed ? ` ${coverFailed} saved without a cover.` : ""}`;
+    if (lastImportedId) {
+      $("import-add-lyrics").dataset.songId = lastImportedId;
+      $("import-add-lyrics").textContent = imported === 1 ? "Add lyrics to your song" : "Add lyrics to the last imported song";
+      $("import-add-lyrics").classList.remove("hidden");
+    }
     showToast(failed ? `${imported} imported; ${failed} could not be saved. See Import for details.` : `Imported ${imported} song${imported === 1 ? "" : "s"}`);
   } catch (error) {
     status.textContent = error?.message || "Import failed. Try again.";
@@ -3995,12 +4234,12 @@ let pendingAppUpdate = false;
 function refreshUpdateNotice() {
   if (!pendingAppUpdate) return;
   $("app-update-banner").classList.remove("hidden");
-  const busy = isPlaying || queueBusy || !!previewingId || deviceImportBusy;
+  const busy = isPlaying || queueBusy || !!previewingId || deviceImportBusy || !!lyricsEditorState || !!songCoverState;
   $("apply-app-update").disabled = busy;
-  $("app-update-text").textContent = busy ? "Update ready. Finish playback and downloads to update." : "A new MusiMe version is ready. Your downloads stay on this device.";
+  $("app-update-text").textContent = lyricsEditorState || songCoverState ? "Update ready. Save or close your editor to update." : busy ? "Update ready. Finish playback and downloads to update." : "A new MusiMe version is ready. Your downloads stay on this device.";
 }
 $("apply-app-update").addEventListener("click", () => {
-  if (isPlaying || queueBusy || previewingId || deviceImportBusy) { refreshUpdateNotice(); return; }
+  if (isPlaying || queueBusy || previewingId || deviceImportBusy || lyricsEditorState || songCoverState) { refreshUpdateNotice(); return; }
   savePlaybackState();
   location.reload();
 });

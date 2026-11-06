@@ -1,5 +1,47 @@
 # Home and installed-PWA release checks
 
+## Personal lyrics and covers (`2026.11.06.3`)
+
+Every downloaded/imported song has **Add / edit lyrics** and **Change cover**
+actions in its options menu. The redesigned Settings import card also offers
+an Add lyrics shortcut after a successful import. Plain lyrics and timestamped
+LRC are previewed as literal text and saved in the existing `lyr-{songId}` store.
+Optional tap-to-sync restarts the selected recording, supports seeking and undo,
+and saves timing only after every nonempty line is marked. A partial session
+explicitly offers **Save plain lyrics**. Pasted text never receives invented
+timing. Inputs are bounded to 60,000 characters and 1,000 lines.
+
+Per-song serialized writes and load-generation checks protect custom lyrics
+from delayed online provider responses. Failed writes retain the draft. The
+cover editor previews a chosen image or generated artwork, caches a normalized
+square JPEG in the existing artwork store, updates the active player's art and
+color without replacing its audio source, and protects saved custom covers from
+background artwork fetches. Canceling preserves the original. Editor sessions
+block the app's Update now button until saved or closed.
+
+Validation on 6 November 2026:
+
+- 21 unit checks passed across lyrics, import/tag handling, and search.
+- The full Edge regression suite passed 38 scenarios, including the five initial
+  lyrics scenarios, offline MP3 playback, 10,000-song rendering, and both installed
+  app upgrade scenarios. Subsequent cover changes passed focused Edge and WebKit
+  checks for both editors, plain/LRC persistence, safe preview text, song
+  isolation, storage failures/retry, late-provider races, manual timing/highlight,
+  cover cancellation/persistence, uninterrupted audio source, and landscape menus.
+- Additional Edge/WebKit checks passed for cover-editor landscape bounds and
+  update controls being disabled while either editor is open. The lyrics editor
+  and import card were checked at widths 280, 390, and 844 in portrait/landscape.
+- The manual synchronization UI test uses a deterministic media clock; it does
+  not claim to measure physical iPhone touch/audio latency. WebKit runs verify
+  frontend and storage behavior, not native iPhone Files or audio output.
+
+Reports and screenshots: `test-results/lyrics-release-edge/`,
+`test-results/lyrics-cover-final-edge/`, `test-results/lyrics-cover-final-webkit/`,
+`test-results/lyrics-cover-update-edge/`, and `test-results/lyrics-cover-update-webkit/`.
+Run `node --test tests/lyrics-tools.test.mjs tests/local-import.test.mjs tests/search-engine.test.mjs`
+and the browser suite with `TEST_MATCH='custom cover:|custom lyrics:|device import:'`.
+These checks ran locally and do not verify a production deployment.
+
 ## iPhone MP3 picker correction (`2026.11.06.2`)
 
 The default audio input uses explicit audio extensions, including `.mp3`.

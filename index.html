@@ -13,7 +13,7 @@
     <!-- iOS home-screen icon MUST be PNG — SVG apple-touch-icons never load -->
     <link rel="apple-touch-icon" href="icons/icon-180.png" />
     <title>MusiMe</title>
-    <link rel="stylesheet" href="styles.css?v=2026.11.06.2" />
+    <link rel="stylesheet" href="styles.css?v=2026.11.06.3" />
   </head>
   <body>
 
@@ -188,21 +188,30 @@
             also work here.
           </p>
         </section>
-        <section class="settings-section">
-          <h3>Import from device</h3>
-          <p class="hint">Choose downloaded MP3s or other audio from Files. Songs appear in Home and play offline. Large files need enough free storage; keep MusiMe open while importing.</p>
-          <label class="pill-btn fake-btn" for="import-cover-input">Choose cover (optional)</label>
-          <input id="import-cover-input" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" class="hidden" />
-          <button id="clear-import-cover" type="button" class="pill-btn hidden">Use automatic artwork</button>
-          <p id="import-cover-name" class="hint">Uses embedded artwork, or creates a cover automatically.</p>
-          <label class="file-drop" for="file-input">
+        <section id="device-import" class="settings-section device-import" aria-labelledby="device-import-title">
+          <div class="import-heading"><span class="import-symbol" aria-hidden="true">♫</span><span class="import-eyebrow">YOUR OFFLINE COLLECTION</span></div>
+          <h3 id="device-import-title">Bring your music.</h3>
+          <p class="import-intro">Add songs from Files. Make them yours with cover art and lyrics, then listen anywhere.</p>
+          <div class="import-artwork-row">
+            <div class="import-artwork-preview" aria-hidden="true"><span>♫</span><img id="import-cover-preview" class="hidden" alt="" /></div>
+            <div class="import-artwork-info">
+              <span class="import-step">01 · COVER ART <span>Optional</span></span>
+              <p id="import-cover-name" class="hint">Embedded artwork or an automatic cover.</p>
+              <div class="import-cover-actions"><label class="pill-btn fake-btn" for="import-cover-input">Choose cover</label><button id="clear-import-cover" type="button" class="pill-btn hidden">Use automatic artwork</button></div>
+              <input id="import-cover-input" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" class="hidden" />
+            </div>
+          </div>
+          <span class="import-step">02 · YOUR SONGS</span>
+          <label class="file-drop import-drop" for="file-input">
             <!-- Avoid audio/*: iOS may map it to the video picker. -->
             <input id="file-input" type="file" accept=".mp3,.m4a,.aac,.wav,.flac,.ogg,.opus,.aiff,.aif" multiple />
-            <span>Choose MP3s or other songs from Files</span>
+            <span class="import-plus" aria-hidden="true">+</span><strong>Choose songs from Files</strong><span>MP3, M4A, WAV & more · Select multiple songs</span>
           </label>
-          <label class="hint"><input id="import-show-all" type="checkbox" /> MP3 missing? Show all files</label>
-          <p class="hint">In Files, tap Browse → Downloads, On My iPhone, or iCloud Drive, then select your MP3s. Import supports audio files; videos are not supported.</p>
+          <label class="hint import-fallback"><input id="import-show-all" type="checkbox" /> MP3 missing? Show all files</label>
+          <p class="import-footnote">Find downloads in Files → Browse. Large imports need free storage; keep MusiMe open until they finish. Videos aren't supported.</p>
           <p id="device-import-status" class="hint" role="status" aria-live="polite" aria-busy="false"></p>
+          <button id="import-add-lyrics" type="button" class="pill-btn wide hidden">Add lyrics to your song</button>
+          <div class="import-lyrics-tip"><span aria-hidden="true">≡</span><p><strong>Have the words?</strong>Open any song's ··· menu → Add / edit lyrics. Paste once. Keep them offline.</p></div>
         </section>
         <section class="settings-section hidden" id="cloud-sync-section">
           <h3>Cloud Sync</h3>
@@ -447,6 +456,46 @@
       </div>
     </div>
 
+    <div id="song-cover-sheet" class="sheet-backdrop hidden">
+      <section class="sheet song-cover-editor" role="dialog" aria-modal="true" aria-labelledby="song-cover-title">
+        <div class="lyrics-editor-heading"><div><span class="import-eyebrow">MAKE IT YOURS</span><h3 id="song-cover-title">Cover artwork</h3></div><button id="song-cover-close" class="pill-btn" type="button" aria-label="Close cover editor">✕</button></div>
+        <p id="song-cover-song" class="hint sheet-song"></p>
+        <div class="song-cover-body">
+          <div class="song-cover-preview"><span aria-hidden="true">♫</span><img id="song-cover-image" class="hidden" alt="Song cover preview" /></div>
+          <label id="song-cover-choose" for="song-cover-file" class="pill-btn accent fake-btn" role="button" tabindex="0">Choose a photo or image</label>
+          <input id="song-cover-file" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" class="hidden" />
+          <button id="song-cover-auto" class="pill-btn" type="button">Create automatic artwork</button>
+          <p class="hint">Your image is cropped to a square and saved offline with this song. Choose an image under 20 MB.</p>
+        </div>
+        <p id="song-cover-status" class="hint" role="status" aria-live="polite"></p>
+        <div class="backup-row lyrics-editor-footer"><button id="song-cover-cancel" class="pill-btn wide" type="button">Cancel</button><button id="song-cover-save" class="pill-btn accent wide" type="button" disabled>Save cover</button></div>
+      </section>
+    </div>
+
+    <div id="lyrics-editor" class="sheet-backdrop hidden">
+      <section class="sheet lyrics-editor" role="dialog" aria-modal="true" aria-labelledby="lyrics-editor-title" aria-describedby="lyrics-editor-song">
+        <div class="lyrics-editor-heading"><div><span class="import-eyebrow">MAKE IT YOURS</span><h3 id="lyrics-editor-title">Your lyrics</h3></div><button id="lyrics-editor-close" class="pill-btn" type="button" aria-label="Close lyrics editor">✕</button></div>
+        <p id="lyrics-editor-song" class="hint sheet-song"></p>
+        <div class="lyrics-editor-body settings-form">
+          <label for="lyrics-editor-text" class="edit-label">Paste lyrics or timestamped LRC</label>
+          <textarea id="lyrics-editor-text" rows="8" maxlength="60001" placeholder="Paste the words here…&#10;&#10;Each lyric on its own line." spellcheck="false"></textarea>
+          <p class="hint">Plain lyrics are ready to read. Add timing below for lines that follow your music.</p>
+          <div class="backup-row"><button id="lyrics-editor-preview-btn" type="button" class="pill-btn">Preview</button><button id="lyrics-sync-start" type="button" class="pill-btn">Sync while listening</button></div>
+          <div id="lyrics-editor-preview" class="lyrics-editor-preview hidden" aria-label="Lyrics preview"></div>
+          <section id="lyrics-sync-panel" class="lyrics-sync-panel hidden" aria-label="Sync lyrics">
+            <p id="lyrics-sync-count" class="import-step"></p><p id="lyrics-sync-line" class="lyrics-sync-line"></p>
+            <label for="lyrics-sync-seek" class="edit-label">Playback position <span id="lyrics-sync-time">0:00</span></label>
+            <input id="lyrics-sync-seek" type="range" min="0" max="1" step="0.1" value="0" />
+            <div class="backup-row"><button id="lyrics-sync-play" class="pill-btn" type="button">Play / pause</button><button id="lyrics-sync-undo" class="pill-btn" type="button">Undo last line</button></div>
+            <button id="lyrics-sync-mark" class="pill-btn accent wide" type="button">Mark this line now</button>
+            <p class="hint">Tap when the line begins. Finish every line to save timing, or save the plain words.</p>
+          </section>
+        </div>
+        <p id="lyrics-editor-status" class="hint" role="status" aria-live="polite"></p>
+        <div class="backup-row lyrics-editor-footer"><button id="lyrics-editor-cancel" class="pill-btn wide" type="button">Cancel</button><button id="lyrics-editor-save" class="pill-btn accent wide" type="button">Save lyrics</button></div>
+      </section>
+    </div>
+
     <!-- Edit song info sheet -->
     <div id="edit-sheet" class="sheet-backdrop hidden">
       <div class="sheet" role="dialog" aria-label="Edit song info">
@@ -486,6 +535,6 @@
     <audio id="audio" preload="metadata"></audio>
     <aside id="toast" class="toast" role="status" aria-live="polite"></aside>
 
-    <script src="app.js?v=2026.11.06.2" type="module"></script>
+    <script src="app.js?v=2026.11.06.3" type="module"></script>
   </body>
 </html>

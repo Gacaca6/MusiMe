@@ -8,7 +8,7 @@ const pw = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root = path.resolve(__dirname, '..');
 const output = path.resolve(process.env.TEST_OUTPUT_DIR || path.join(root, 'test-results'));
 fs.mkdirSync(output, { recursive: true });
-const build = '2026.11.06.2';
+const build = '2026.11.06.3';
 const results = [];
 const browserResourceDiagnostics = [];
 let activeScenario = "";
@@ -138,6 +138,178 @@ async function submitSearch(page, query) {
 }
 async function searchSettled(page) { await page.waitForFunction(() => document.getElementById('search-results').getAttribute('aria-busy') === 'false'); }
 async function runFrontend() {
+  await check('custom cover: existing song photo changes persist offline and update player without restarting audio', async () => {
+    const { context, page, errors } = await contextPage();
+    try {
+      await seed(page, library(1)); await clickMode(page, 'songs'); await page.locator('.song-main').click();
+      const source = await page.locator('#audio').getAttribute('src');
+      await page.locator('#songs button[aria-label^="Options for"]').click(); await page.getByRole('button', { name: 'Change cover', exact: true }).click();
+      await page.locator('.song-cover-editor').evaluate((el) => Promise.all(el.getAnimations().map((animation) => animation.finished)));
+      await page.setViewportSize({width:844,height:390});
+      const coverBounds = await page.locator('.song-cover-editor').boundingBox();
+      assert.ok(coverBounds.y >= -1 && coverBounds.y+coverBounds.height <= 391);
+      await page.setViewportSize({width:390,height:844});
+      await page.locator('#song-cover-file').setInputFiles({ name: 'my-cover.png', mimeType: 'image/png', buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a3ioAAAAASUVORK5CYII=', 'base64') });
+      await page.waitForFunction(() => !document.getElementById('song-cover-save').disabled);
+      await page.screenshot({ path: path.join(output, 'song-cover-editor.png') });
+      await page.locator('#song-cover-save').click(); await page.locator('#song-cover-sheet').waitFor({ state: 'hidden' });
+      assert.equal(await page.locator('#audio').getAttribute('src'), source);
+      assert.equal(await page.locator('#mini-art').evaluate((img) => img.src.startsWith('blob:')), true);
+      assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('musime-songs-meta'))[0].customArtwork), true);
+      await page.reload(); await page.waitForFunction(() => document.body.dataset.libraryReady === 'true'); await clickMode(page, 'songs');
+      await page.locator('#songs button[aria-label^="Options for"]').click(); await page.getByRole('button', { name: 'Change cover', exact: true }).click();
+      await page.waitForFunction(() => { const i = document.getElementById('song-cover-image'); return !i.classList.contains('hidden') && i.complete && i.naturalWidth > 0; });
+      await page.locator('#song-cover-auto').click(); await page.waitForFunction(() => !document.getElementById('song-cover-save').disabled);
+      await page.locator('#song-cover-cancel').click();
+      await page.locator('#songs button[aria-label^="Options for"]').click(); await page.getByRole('button', { name: 'Change cover', exact: true }).click();
+      assert.equal(await page.locator('#song-cover-save').isDisabled(), true);
+      await noErrors(errors);
+    } finally { await context.close(); }
+  });
+  await check('custom lyrics: app updates wait for unsaved lyrics and cover editors', async () => {
+    const { context, page, errors } = await contextPage();
+    try {
+      await seed(page, library(1)); await clickMode(page, 'songs');
+      await page.locator('#songs button[aria-label^="Options for"]').click(); await page.getByRole('button', { name: 'Add / edit lyrics', exact: true }).click();
+      await page.waitForFunction(() => !document.getElementById('lyrics-editor-text').readOnly);
+      await page.locator('#lyrics-editor-text').fill('Unsaved lyrics');
+      await page.evaluate(() => navigator.serviceWorker.dispatchEvent(new MessageEvent('message', {data:{type:'MUSIME_VERSION',version:'future-test'}})));
+      assert.equal(await page.locator('#apply-app-update').isDisabled(), true);
+      await page.locator('#lyrics-editor-cancel').click(); assert.equal(await page.locator('#apply-app-update').isEnabled(), true);
+      await page.locator('#songs button[aria-label^="Options for"]').click(); await page.getByRole('button', { name: 'Change cover', exact: true }).click();
+      assert.equal(await page.locator('#apply-app-update').isDisabled(), true);
+      await page.locator('#song-cover-cancel').click(); assert.equal(await page.locator('#apply-app-update').isEnabled(), true);
+      await noErrors(errors);
+    } finally { await context.close(); }
+  });
+  await check('custom cover: invalid image and storage errors keep old artwork; retry and automatic cover work', async () => {
+    const { context, page, errors } = await contextPage();
+    try {
+      await seed(page, library(1)); await clickMode(page, 'songs');
+      await page.locator('#songs button[aria-label^="Options for"]').click(); await page.getByRole('button', { name: 'Change cover', exact: true }).click();
+      await page.locator('#song-cover-file').setInputFiles({ name: 'broken.png', mimeType: 'image/png', buffer: Buffer.from('not an image') });
+      await page.waitForFunction(() => document.getElementById('song-cover-status').textContent.includes('could not be opened'));
+      assert.equal(await page.locator('#song-cover-save').isDisabled(), true);
+      await page.locator('#song-cover-auto').click(); await page.waitForFunction(() => !document.getElementById('song-cover-save').disabled);
+      await page.evaluate(() => { const put = IDBObjectStore.prototype.put; window.__coverPut = put; IDBObjectStore.prototype.put = function (value, key) { if (String(key).startsWith('art-')) throw new DOMException('Full', 'QuotaExceededError'); return put.call(this, value, key); }; });
+      await page.locator('#song-cover-save').click(); await page.waitForFunction(() => document.getElementById('song-cover-status').textContent.includes('Storage is full'));
+      await page.evaluate(() => IDBObjectStore.prototype.put = window.__coverPut);
+      await page.locator('#song-cover-save').click(); await page.locator('#song-cover-sheet').waitFor({ state: 'hidden' });
+      assert.match(await page.locator('#toast').textContent(), /Cover saved offline/);
+      await noErrors(errors);
+    } finally { await context.close(); }
+  });
+  await check('custom lyrics: imported song shortcut, plain preview, safe text, offline persistence and re-edit', async () => {
+    const { context, page, errors } = await contextPage();
+    try {
+      await seed(page, [], { playlists: ['All songs'] }); await page.locator('[aria-label="Settings"]').click();
+      await page.locator('#file-input').setInputFiles(path.join(root, 'tests/fixtures/import-tone.mp3'));
+      await page.locator('#import-add-lyrics').waitFor({ state: 'visible' });
+      await page.locator('#import-add-lyrics').click(); await page.waitForFunction(() => !document.getElementById('lyrics-editor-text').readOnly);
+      const words = 'First line\n\nAmagambo 🎵\n<img src=x onerror="window.lyricsXss=true">';
+      await page.locator('#lyrics-editor-text').fill(words); await page.locator('#lyrics-editor-preview-btn').click();
+      assert.equal(await page.locator('#lyrics-editor-preview img').count(), 0);
+      assert.match(await page.locator('#lyrics-editor-preview').textContent(), /Amagambo/);
+      await page.locator('#lyrics-editor-save').click(); await page.locator('#lyrics-editor').waitFor({ state: 'hidden' });
+      if ((process.env.TEST_BROWSER || 'chromium') === 'chromium') { await page.evaluate(() => navigator.serviceWorker.ready); await context.setOffline(true); }
+      await page.reload(); await page.waitForFunction(() => document.body.dataset.libraryReady === 'true'); await clickMode(page, 'songs');
+      await page.locator('#songs button[aria-label^="Options for"]').click(); await page.getByRole('button', { name: 'Add / edit lyrics', exact: true }).click();
+      await page.waitForFunction(() => !document.getElementById('lyrics-editor-text').readOnly);
+      assert.equal(await page.locator('#lyrics-editor-text').inputValue(), words);
+      await page.locator('#lyrics-editor-text').fill('Unsaved draft'); await page.locator('#lyrics-editor-cancel').click();
+      await page.locator('.song-main').click(); await page.waitForFunction(() => !document.getElementById('lyrics-card').classList.contains('hidden'));
+      await page.locator('#mini-title').click(); await page.locator('#np-lyrics').click();
+      assert.match(await page.locator('#lf-scroll').textContent(), /Amagambo/);
+      assert.equal(await page.locator('#lf-scroll img').count(), 0); assert.equal(await page.evaluate(() => window.lyricsXss), undefined);
+      await page.screenshot({ path: path.join(output, 'custom-lyrics-reader.png') });
+      await noErrors(errors);
+    } finally { await context.close(); }
+  });
+  await check('custom lyrics: professional import and editor fit narrow phones and landscape', async () => {
+    const { context, page, errors } = await contextPage();
+    try {
+      await seed(page, library(1)); await page.locator('[aria-label="Settings"]').click();
+      for (const viewport of [{width:280,height:640}, {width:390,height:844}, {width:844,height:390}]) {
+        await page.setViewportSize(viewport);
+        await page.locator('#device-import').scrollIntoViewIfNeeded();
+        const overflow = await page.locator('#device-import').evaluate((el) => el.scrollWidth - el.clientWidth);
+        assert.ok(overflow <= 1, `Import overflow ${overflow} at ${viewport.width}`);
+        if (viewport.width === 390) { await page.locator('#device-import').evaluate((el) => el.scrollIntoView({block:'start'})); await page.screenshot({path:path.join(output,'import-settings.png')}); }
+      }
+      await page.setViewportSize({width:390,height:844}); await page.locator('[data-view="view-home"]').click(); await clickMode(page,'songs');
+      await page.locator('#songs button[aria-label^="Options for"]').click(); await page.getByRole('button',{name:'Add / edit lyrics',exact:true}).click();
+      await page.waitForFunction(() => !document.getElementById('lyrics-editor-text').readOnly);
+      await page.locator('#lyrics-editor-text').fill('First verse\nYour words, your music\n\nA chorus to remember');
+      await page.locator('.lyrics-editor').evaluate((el) => Promise.all(el.getAnimations().map((animation) => animation.finished)));
+      for (const viewport of [{width:280,height:640}, {width:390,height:844}, {width:844,height:390}]) {
+        await page.setViewportSize(viewport);
+        const bounds = await page.locator('.lyrics-editor').boundingBox();
+        assert.ok(bounds.x >= -1 && bounds.y >= -1 && bounds.x+bounds.width <= viewport.width+1 && bounds.y+bounds.height <= viewport.height+1, JSON.stringify({viewport,bounds}));
+        assert.ok(await page.locator('#lyrics-editor-save').isVisible());
+        if (viewport.width === 390) await page.screenshot({path:path.join(output,'lyrics-editor.png')});
+      }
+      await noErrors(errors);
+    } finally { await context.close(); }
+  });
+  await check('custom lyrics: timestamped lines, validation, failed storage retry and song isolation', async () => {
+    const { context, page, errors } = await contextPage();
+    try {
+      await seed(page, library(2)); await clickMode(page, 'songs');
+      await page.locator('#songs button[aria-label^="Options for"]').first().click(); await page.getByRole('button', { name: 'Add / edit lyrics', exact: true }).click();
+      await page.waitForFunction(() => !document.getElementById('lyrics-editor-text').readOnly);
+      await page.locator('#lyrics-editor-save').click(); assert.match(await page.locator('#lyrics-editor-status').textContent(), /Paste some lyrics/);
+      const lrc = '[00:00.00] First [chorus]\n[00:02.00] Second line';
+      await page.locator('#lyrics-editor-text').fill(lrc);
+      await page.evaluate(() => { const original = IDBObjectStore.prototype.put; window.__restoreLyricsPut = () => IDBObjectStore.prototype.put = original; IDBObjectStore.prototype.put = function (value, key) { if (String(key).startsWith('lyr-')) throw new DOMException('Full', 'QuotaExceededError'); return original.call(this, value, key); }; });
+      await page.locator('#lyrics-editor-save').click(); await page.waitForFunction(() => document.getElementById('lyrics-editor-status').textContent.includes('Storage is full'));
+      assert.equal(await page.locator('#lyrics-editor-text').inputValue(), lrc);
+      await page.evaluate(() => window.__restoreLyricsPut()); await page.locator('#lyrics-editor-save').click(); await page.locator('#lyrics-editor').waitFor({ state: 'hidden' });
+      await page.locator('.song-main').first().click(); await page.waitForFunction(() => document.querySelectorAll('#lyrics-panel .lyric-line').length === 2);
+      assert.equal(await page.locator('#lyrics-panel .lyric-line').first().textContent(), 'First [chorus]');
+      await page.locator('#songs button[aria-label^="Options for"]').nth(1).click(); await page.getByRole('button', { name: 'Add / edit lyrics', exact: true }).click();
+      await page.waitForFunction(() => !document.getElementById('lyrics-editor-text').readOnly); assert.equal(await page.locator('#lyrics-editor-text').inputValue(), '');
+      await noErrors(errors);
+    } finally { await context.close(); }
+  });
+  await check('custom lyrics: tap-to-sync records, undo and complete save', async () => {
+    const { context, page, errors } = await contextPage();
+    try {
+      await seed(page, library(1)); await clickMode(page, 'songs');
+      await page.locator('#songs button[aria-label^="Options for"]').click(); await page.getByRole('button', { name: 'Add / edit lyrics', exact: true }).click();
+      await page.waitForFunction(() => !document.getElementById('lyrics-editor-text').readOnly);
+      await page.locator('#lyrics-editor-text').fill('First line\nSecond line'); await page.locator('#lyrics-sync-start').click();
+      await page.locator('#lyrics-sync-panel').waitFor({ state: 'visible' });
+      // Deterministic UI timing checks, separate from audio-output tests.
+      await page.evaluate(() => { const a = document.getElementById('audio'); a.pause(); Object.defineProperty(a, 'currentTime', { configurable: true, writable: true, value: 1 }); });
+      await page.locator('#lyrics-sync-mark').click(); assert.match(await page.locator('#lyrics-sync-count').textContent(), /1 of 2/);
+      await page.locator('#lyrics-sync-undo').click(); assert.match(await page.locator('#lyrics-sync-count').textContent(), /0 of 2/);
+      await page.locator('#lyrics-sync-mark').click(); await page.evaluate(() => document.getElementById('audio').currentTime = 3);
+      await page.locator('#lyrics-sync-mark').click(); assert.equal(await page.locator('#lyrics-editor-save').textContent(), 'Save synced lyrics');
+      await page.locator('#lyrics-editor-save').click(); await page.locator('#lyrics-editor').waitFor({ state: 'hidden' });
+      assert.equal(await page.locator('#lyrics-panel .lyric-line').count(), 2);
+      await page.evaluate(() => document.getElementById('audio').dispatchEvent(new Event('timeupdate')));
+      assert.equal(await page.locator('#lyrics-panel .lyric-line.active').textContent(), 'Second line');
+      await noErrors(errors);
+    } finally { await context.close(); }
+  });
+  await check('custom lyrics: late online lookup cannot overwrite pasted lyrics', async () => {
+    const { context, page, errors } = await contextPage({ serviceWorkers: 'block' });
+    let release;
+    const gate = new Promise((resolve) => release = resolve);
+    try {
+      await context.route('https://lrclib.net/api/search**', async (route) => { await gate; await route.fulfill({ headers: { 'Access-Control-Allow-Origin': '*' }, json: [{ syncedLyrics: '[00:00] Wrong provider words', plainLyrics: 'Wrong provider words' }] }); });
+      await seed(page, library(1)); await clickMode(page, 'songs'); await page.locator('.song-main').click();
+      await page.locator('#songs button[aria-label^="Options for"]').click(); await page.getByRole('button', { name: 'Add / edit lyrics', exact: true }).click();
+      await page.waitForFunction(() => !document.getElementById('lyrics-editor-text').readOnly);
+      await page.locator('#lyrics-editor-text').fill('My own words'); await page.locator('#lyrics-editor-save').click(); await page.locator('#lyrics-editor').waitFor({ state: 'hidden' });
+      release(); await page.waitForTimeout(400);
+      assert.equal(await page.locator('#lyrics-panel .lyrics-plain').textContent(), 'My own words');
+      await page.reload(); await page.waitForFunction(() => document.body.dataset.libraryReady === 'true'); await clickMode(page, 'songs');
+      await page.locator('#songs button[aria-label^="Options for"]').click(); await page.getByRole('button', { name: 'Add / edit lyrics', exact: true }).click();
+      await page.waitForFunction(() => !document.getElementById('lyrics-editor-text').readOnly); assert.equal(await page.locator('#lyrics-editor-text').inputValue(), 'My own words');
+      await noErrors(errors);
+    } finally { release(); await context.close(); }
+  });
   await check('album artist: correct identity, complete catalog pages, album detail and download', async () => {
     const { context, page, errors } = await contextPage(process.env.TEST_BROWSER === 'webkit' ? { serviceWorkers: 'block' } : {});
     const pages = [];
