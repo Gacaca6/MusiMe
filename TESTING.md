@@ -1,5 +1,68 @@
 # Home and installed-PWA release checks
 
+## iPhone MP3 picker correction (`2026.11.06.2`)
+
+The default audio input uses explicit audio extensions, including `.mp3`.
+It intentionally avoids `audio/*`. WebKit's documented
+[iOS audio-picker issue](https://bugs.webkit.org/show_bug.cgi?id=242110) can
+leave MP3/audio files disabled when `audio/*` is present. Selection now uses
+the extension-filtered Files picker. The **MP3 missing? Show all files** option
+removes the filter entirely as a fallback. The importer validates selected files
+and explains that videos are unsupported rather than silently ignoring them.
+MP3 files with missing/generic MIME types are assigned `audio/mpeg` using a
+native Blob slice, without reading the recording into JavaScript memory.
+
+The test fixture is a genuine, generated 32,700-byte MP3 tone with
+ID3 metadata. Tests activate the file-chooser event from the visible import
+label, assert the absence of the problematic audio wildcard, verify that the
+fallback removes the filter, import the genuine MP3
+both as a normal file and with a generic MIME type, and verify tag persistence.
+Edge also verifies playback after an offline reload. Mobile-size WebKit checks
+verify import/persistence; they do not operate an actual iPhone Files picker
+or verify its audio output. A physical iPhone has not been available for testing.
+
+Unit results: 17 passing checks. Focused browser reports are written to
+`test-results/mp3-picker-final-edge/` and `test-results/mp3-picker-final-webkit/`.
+These checks ran locally; production deployment must be verified separately.
+
+## Device import — 6 November 2026 (`2026.11.06.1`)
+
+Settings → Import from device accepts MP3 files with missing/generic MIME types,
+reads bounded ID3 title/artist/embedded-cover tags, and stores the original File
+directly in IndexedDB. Users may choose a cover for a batch; otherwise embedded
+artwork or a locally generated cover is saved offline. Imported singles remain
+in Home's Songs collection rather than becoming downloaded albums.
+
+Validation for this change:
+
+- 16 unit checks passed (4 import/tag checks and 12 existing search checks).
+- The full Edge suite passed all 31 scenarios, including offline playback and
+  installed-app upgrades. Additional focused checks passed for safely rejecting
+  an unsupported large-Blob fallback and an actual 1,073,741,824-byte WAV file.
+- The 1 GiB file survived reload with the exact stored byte count and began
+  playback. The test origin's temporary browser quota was explicitly increased
+  via CDP to 3 GiB; with the default insufficient quota, import correctly failed
+  without adding a song. This is a desktop storage/playback test, not an iPhone
+  memory, disk, or audio-output guarantee.
+- Five WebKit checks passed: blocked storage/metadata rollback, mixed MP3 import
+  and covers, quota failure/retry, safe large-file fallback rejection, and import
+  persistence. Physical iPhone Files-picker and large-file tests remain required.
+
+There is no application file-size limit on native Blob storage. Device quota,
+free space, and supported audio formats still apply. Engines requiring the
+ArrayBuffer compatibility fallback reject device imports over 32 MiB rather
+than allocating the full recording in memory. Optional DJ analysis also skips
+recordings over 32 MiB; normal playback remains available. Tag reads are capped
+at 2 MiB; oversized/unsupported tags fall back to the filename and generated art.
+
+Run `node --test tests/local-import.test.mjs tests/search-engine.test.mjs`.
+For browser checks use the existing instructions below with
+`TEST_MATCH='device import:|real import|blocked device storage'`.
+Set `TEST_LARGE_IMPORT=1` on Edge to include the real 1 GiB fixture; it is deleted
+after the scenario. Reports are in `test-results/import-release-edge/`,
+`test-results/import-release-webkit/`, `test-results/import-final-edge/`, and
+`test-results/import-final-large/`. These changes have not been deployed.
+
 Tested locally on 23 October 2026. Nothing in this report is a production deployment.
 
 ## What the automated suite covers

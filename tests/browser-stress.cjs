@@ -8,7 +8,7 @@ const pw = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root = path.resolve(__dirname, '..');
 const output = path.resolve(process.env.TEST_OUTPUT_DIR || path.join(root, 'test-results'));
 fs.mkdirSync(output, { recursive: true });
-const build = '2026.10.26.1';
+const build = '2026.11.06.2';
 const results = [];
 const browserResourceDiagnostics = [];
 let activeScenario = "";
@@ -695,6 +695,158 @@ async function runFrontend() {
       await page.waitForFunction(() => document.getElementById('toast').textContent.includes('Could not download'));
       assert.equal(await page.locator('#songs .song').count(), 0); await noErrors(errors);
     } finally { await context.close(); }
+  });
+  await check('device import: audio-extension Files chooser and unfiltered fallback import genuine MP3s with playback', async () => {
+    const { context, page, errors } = await contextPage({ isMobile: true, hasTouch: true, viewport: { width: 390, height: 844 } });
+    try {
+      await seed(page, [], { playlists: ['All songs'] });
+      await page.locator('[aria-label="Settings"]').click();
+      // This is the filter regression: setInputFiles alone bypasses accept and
+      // cannot prove that iOS's Files UI will leave audio files selectable.
+      assert.match(await page.locator('#file-input').getAttribute('accept'), /\.mp3/);
+      assert.doesNotMatch(await page.locator('#file-input').getAttribute('accept'), /audio\/\*|video/);
+      const choosing = page.waitForEvent('filechooser');
+      await page.locator('label[for="file-input"]').click();
+      const chooser = await choosing;
+      assert.equal(chooser.isMultiple(), true);
+      await chooser.setFiles(path.join(root, 'tests/fixtures/import-tone.mp3'));
+      await page.waitForFunction(() => document.getElementById('device-import-status').textContent === '1 song imported to Home.');
+      await page.locator('#import-show-all').check();
+      assert.equal(await page.locator('#file-input').getAttribute('accept'), null);
+      await page.locator('#file-input').setInputFiles({ name: 'Generic provider.MP3', mimeType: 'application/octet-stream', buffer: fs.readFileSync(path.join(root, 'tests/fixtures/import-tone.mp3')) });
+      await page.waitForFunction(() => document.getElementById('device-import-status').getAttribute('aria-busy') === 'false' && JSON.parse(localStorage.getItem('musime-songs-meta')).length === 2);
+      const metadata = await page.evaluate(() => JSON.parse(localStorage.getItem('musime-songs-meta')));
+      assert.equal(metadata.length, 2); assert.equal(metadata[0].title, 'MP3 import check'); assert.equal(metadata[0].artist, 'MusiMe test tone');
+      await page.reload(); await page.waitForFunction(() => document.body.dataset.libraryReady === 'true');
+      assert.match(await page.locator('#file-input').getAttribute('accept'), /\.mp3/);
+      await clickMode(page, 'songs');
+      assert.match(await page.locator('#songs').textContent(), /MP3 import check/);
+      if ((process.env.TEST_BROWSER || 'chromium') === 'chromium') {
+        await page.evaluate(() => navigator.serviceWorker.ready); await context.setOffline(true);
+        await page.reload(); await page.waitForFunction(() => document.body.dataset.libraryReady === 'true'); await clickMode(page, 'songs');
+        await page.locator('.song-main').first().click();
+        await page.waitForFunction(() => !document.getElementById('audio').paused && document.getElementById('audio').currentTime > 0.2);
+      }
+      await noErrors(errors);
+      return { mp3Bytes: fs.statSync(path.join(root, 'tests/fixtures/import-tone.mp3')).size, physicalIPhonePickerVerified: false };
+    } finally { await context.close(); }
+  });
+  await check('device import: Files MP3 tags, custom and generated covers persist offline; invalid files do not block a batch', async () => {
+    const { context, page, errors } = await contextPage();
+    try {
+      await seed(page, [], { playlists: ['All songs'] });
+      await page.locator('[aria-label="Settings"]').click();
+      const frames = Buffer.concat([['TIT2', 'Tagged song'], ['TPE1', 'Tagged artist']].map(([id, text]) => {
+        const value = Buffer.from('\x03' + text), header = Buffer.alloc(10); header.write(id); header.writeUInt32BE(value.length, 4);
+        return Buffer.concat([header, value]);
+      }));
+      const tagHeader = Buffer.from([73,68,51,3,0,0,0,0,frames.length >>> 7, frames.length & 127]);
+      await page.locator('#file-input').setInputFiles([
+        { name: 'wrong filename.mp3', mimeType: 'application/octet-stream', buffer: Buffer.concat([tagHeader, frames, audio]) },
+        { name: 'empty.mp3', mimeType: 'audio/mpeg', buffer: Buffer.alloc(0) },
+        { name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('not music') },
+        { name: 'Video.mp4', mimeType: 'video/mp4', buffer: Buffer.from('video data') },
+        { name: 'Another.wav', mimeType: 'audio/wav', buffer: audio },
+      ]);
+      await page.waitForFunction(() => document.getElementById('device-import-status').textContent.includes('2 songs imported to Home. 3 failed.'));
+      assert.match(await page.locator('#device-import-status').textContent(), /Videos are not supported/);
+      await page.locator('#import-cover-input').setInputFiles({ name: 'cover.png', mimeType: 'image/png', buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a3ioAAAAASUVORK5CYII=', 'base64') });
+      await page.locator('#file-input').setInputFiles({ name: 'Custom.wav', mimeType: 'audio/wav', buffer: audio });
+      await page.waitForFunction(() => document.getElementById('device-import-status').textContent === '1 song imported to Home.');
+      assert.equal(await page.locator('#file-input').isEnabled(), true);
+      await page.reload(); await page.waitForFunction(() => document.body.dataset.libraryReady === 'true');
+      const saved = await page.evaluate(async () => {
+        const songs = JSON.parse(localStorage.getItem('musime-songs-meta'));
+        const db = await new Promise((resolve) => { const r = indexedDB.open('musime-db', 1); r.onsuccess = () => resolve(r.result); });
+        const covers = await Promise.all(songs.map((s) => new Promise((resolve) => { const r = db.transaction('songs').objectStore('songs').get('art-' + s.id); r.onsuccess = () => resolve(r.result?.size || r.result?.data?.byteLength || 0); })));
+        db.close(); return { songs, covers };
+      });
+      assert.equal(saved.songs.length, 3); assert.equal(saved.songs.find((s) => s.title === 'Tagged song').artist, 'Tagged artist');
+      assert.ok(saved.covers.every((n) => n > 0));
+      assert.ok(saved.songs.every((s) => !s.downloadedAsAlbum));
+      await page.locator('[data-view="view-home"]').click();
+      await page.waitForFunction(() => [...document.querySelectorAll('#home-recent img')].filter((img) => img.complete && img.naturalWidth > 0).length === 3);
+      await page.locator('#splash').waitFor({ state: 'hidden' });
+      await page.screenshot({ path: path.join(output, 'device-import-home.png') });
+      await noErrors(errors);
+    } finally { await context.close(); }
+  });
+  await check('device import: quota failure is explained and a later retry succeeds', async () => {
+    const { context, page, errors } = await contextPage();
+    try {
+      await seed(page, [], { playlists: ['All songs'] });
+      await page.evaluate(() => {
+        window.__estimate = navigator.storage?.estimate?.bind(navigator.storage) || (async () => ({}));
+        if (!navigator.storage) Object.defineProperty(navigator, 'storage', { configurable: true, value: {} });
+        navigator.storage.estimate = async () => ({ quota: 1000, usage: 999 });
+      });
+      await page.locator('[aria-label="Settings"]').click();
+      await page.locator('#file-input').setInputFiles({ name: 'Retry.wav', mimeType: 'audio/wav', buffer: audio });
+      await page.waitForFunction(() => document.getElementById('device-import-status').textContent.includes('Not enough storage'));
+      assert.equal(await page.locator('#songs .song').count(), 0);
+      await page.evaluate(() => navigator.storage.estimate = window.__estimate);
+      await page.locator('#file-input').setInputFiles({ name: 'Retry.wav', mimeType: 'audio/wav', buffer: audio });
+      await page.waitForFunction(() => document.getElementById('device-import-status').textContent === '1 song imported to Home.');
+      assert.equal(await page.locator('#songs .song').count(), 1); await noErrors(errors);
+    } finally { await context.close(); }
+  });
+  await check('device import: unsupported large Blob storage refuses unsafe full-memory fallback', async () => {
+    const { context, page, errors } = await contextPage();
+    try {
+      await seed(page, [], { playlists: ['All songs'] }); await page.locator('[aria-label="Settings"]').click();
+      await page.evaluate(() => {
+        const put = IDBObjectStore.prototype.put;
+        IDBObjectStore.prototype.put = function (value, ...args) {
+          if (value instanceof File) throw new DOMException('Blob unavailable', 'DataCloneError');
+          return put.call(this, value, ...args);
+        };
+        const f = new File(['audio'], 'Large.mp3', { type: 'audio/mpeg' });
+        Object.defineProperty(f, 'size', { value: 40 * 1024 * 1024 });
+        // Only slices may be read. The simulated large file must never be read.
+        f.arrayBuffer = () => { throw new Error('Unsafe whole-file fallback'); };
+        const list = new DataTransfer(); list.items.add(f);
+        document.getElementById('file-input').files = list.files;
+        document.getElementById('file-input').dispatchEvent(new Event('change'));
+      });
+      await page.waitForFunction(() => document.getElementById('device-import-status').textContent.includes('cannot safely store this large file'));
+      assert.equal(await page.locator('#songs .song').count(), 0);
+      assert.equal(await page.locator('#file-input').isEnabled(), true); await noErrors(errors);
+    } finally { await context.close(); }
+  });
+  if (process.env.TEST_LARGE_IMPORT) await check('device import: actual 1 GiB file stores without whole-file JS reads and survives reload', async () => {
+    const { context, page, errors } = await contextPage();
+    const filename = path.join(output, 'large-import.wav'), bytes = 1024 ** 3;
+    try {
+      const fd = fs.openSync(filename, 'w');
+      try { fs.ftruncateSync(fd, bytes); const header = Buffer.from(audio.subarray(0, 44)); header.writeUInt32LE(bytes - 8, 4); header.writeUInt32LE(bytes - 44, 40); fs.writeSync(fd, header, 0, header.length, 0); } finally { fs.closeSync(fd); }
+      await seed(page, [], { playlists: ['All songs'] });
+      // Incognito's default temporary quota may be below 1 GiB. Grant this
+      // isolated test origin enough space; production still obeys device quota.
+      if ((process.env.TEST_BROWSER || 'chromium') === 'chromium') {
+        const cdp = await context.newCDPSession(page);
+        await cdp.send('Storage.overrideQuotaForOrigin', { origin, quotaSize: 3 * 1024 ** 3 });
+      }
+      await page.evaluate(() => {
+        const read = Blob.prototype.arrayBuffer;
+        Blob.prototype.arrayBuffer = function () { if (this.size > 2 * 1024 * 1024) throw new Error('Whole audio read forbidden'); return read.call(this); };
+      });
+      await page.locator('[aria-label="Settings"]').click(); await page.locator('#file-input').setInputFiles(filename);
+      await page.waitForFunction(() => document.getElementById('device-import-status').textContent.includes('imported to Home.'), null, { timeout: 180000 });
+      assert.equal(await page.locator('#device-import-status').textContent(), '1 song imported to Home.');
+      await page.reload(); await page.waitForFunction(() => document.body.dataset.libraryReady === 'true');
+      const size = await page.evaluate(async () => {
+        const song = JSON.parse(localStorage.getItem('musime-songs-meta'))[0];
+        const db = await new Promise((resolve) => { const r = indexedDB.open('musime-db', 1); r.onsuccess = () => resolve(r.result); });
+        const blob = await new Promise((resolve) => { const r = db.transaction('songs').objectStore('songs').get(song.id); r.onsuccess = () => resolve(r.result); });
+        db.close(); return blob.size;
+      });
+      assert.equal(size, bytes);
+      if ((process.env.TEST_BROWSER || 'chromium') === 'chromium') {
+        await clickMode(page, 'songs'); await page.locator('.song-main').click();
+        await page.waitForFunction(() => !document.getElementById('audio').paused && document.getElementById('audio').currentTime > 0.2);
+      }
+      await noErrors(errors); return { persistedBytes: size };
+    } finally { await context.close(); if (fs.existsSync(filename)) fs.unlinkSync(filename); }
   });
   await check('real import saves audio and survives reload, including the Blob-storage fallback', async () => {
     const { context, page, errors } = await contextPage();

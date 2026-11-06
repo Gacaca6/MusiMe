@@ -1,5 +1,6 @@
-import { normalizeSearch, searchMatch, rankSearchSongs, rankSearchArtists, dedupeSearchSongs, createSearchClient } from "./search-engine.js?v=2026.10.26.1";
-const APP_VERSION = "2026.10.26.1";
+import { normalizeSearch, searchMatch, rankSearchSongs, rankSearchArtists, dedupeSearchSongs, createSearchClient } from "./search-engine.js?v=2026.11.06.2";
+import { readLocalTags, isLocalAudio, localAudioBlob, localCover } from "./local-import.js?v=2026.11.06.2";
+const APP_VERSION = "2026.11.06.2";
 const DB_NAME = "musime-db";
 const STORE_NAME = "songs";
 const SONGS_KEY = "musime-songs-meta";
@@ -365,8 +366,14 @@ function storedBlob(value) {
   if (value?.data instanceof ArrayBuffer && typeof value.type === "string") return new Blob([value.data], { type: value.type });
   return null;
 }
-async function saveBlob(id, blob) {
+async function saveBlob(id, blob, largeDeviceImport = false) {
   const db = await openDb();
+  // Older engines need an ArrayBuffer fallback. Never allocate a whole large
+  // recording in JS memory just to work around a browser storage limitation.
+  const fallbackValue = async () => {
+    if (largeDeviceImport && blob.size > 32 * 1024 * 1024) throw new Error("This browser cannot safely store this large file. Update iOS or try a smaller file.");
+    return { data: await blob.arrayBuffer(), type: blob.type };
+  };
   const put = (value) => new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, "readwrite");
     const request = tx.objectStore(STORE_NAME).put(value, id);
@@ -378,10 +385,10 @@ async function saveBlob(id, blob) {
       try { await put(blob); }
       catch (error) {
         if (error?.name !== "UnknownError" && error?.name !== "DataCloneError") throw error;
-        await put({ data: await blob.arrayBuffer(), type: blob.type });
+        await put(await fallbackValue());
         storedBlobsSupported = false;
       }
-    } else await put({ data: await blob.arrayBuffer(), type: blob.type });
+    } else await put(await fallbackValue());
   } finally { db.close(); }
   if (availableAudioIds && !/^(art-|lyr-|dj-)/.test(id)) availableAudioIds.add(id);
 }
@@ -1772,6 +1779,9 @@ function decodeForAnalysis(arrayBuf) {
 }
 
 async function analyzeAudioBlob(blob) {
+  // Decoding a long imported recording expands compressed audio many times.
+  // Playback can stream it normally; optional DJ analysis must stay bounded.
+  if (blob.size > 32 * 1024 * 1024) throw new Error("Recording too large for on-device DJ analysis");
   const buf = await decodeForAnalysis(await blob.arrayBuffer());
   const sr = buf.sampleRate, n = buf.length;
   const ch0 = buf.getChannelData(0);
@@ -2808,7 +2818,7 @@ async function addSong({ title, artist, source, blob, album = "", artwork = "", 
     return existing.id;
   }
   const id = createId();
-  await saveBlob(id, blob);
+  await saveBlob(id, blob, source === "device");
   // saavnId/query/srcUrl are re-download keys (no effect on offline playback) —
   // they let a future sync/restore re-fetch the audio: jiosaavn via saavnId
   // (query as fallback), web songs via the original srcUrl.
@@ -3289,15 +3299,78 @@ nodes.urlForm.addEventListener("submit", async (e) => {
   e.preventDefault(); const url = nodes.songUrl.value.trim(); const title = nodes.songTitle.value.trim(); const artist = nodes.songArtist.value.trim();
   try { showToast("Downloading..."); const blob = await fetchAudioBlob(url, () => {}); await addSong({ title, artist, source: "web", blob, srcUrl: url }); nodes.urlForm.reset(); showToast("Saved offline"); } catch { showToast("Could not download"); }
 });
+let deviceImportBusy = false;
+const deviceAudioTypes = nodes.fileInput.accept;
+$("import-show-all").addEventListener("change", (e) => {
+  if (e.target.checked) nodes.fileInput.removeAttribute("accept");
+  else nodes.fileInput.setAttribute("accept", deviceAudioTypes);
+});
+$("import-cover-input").addEventListener("change", (e) => {
+  const file = e.target.files?.[0];
+  $("import-cover-name").textContent = file ? `${file.name} — used for all songs in this import.` : "Uses embedded artwork, or creates a cover automatically.";
+  $("clear-import-cover").classList.toggle("hidden", !file);
+});
+$("clear-import-cover").addEventListener("click", () => {
+  if (deviceImportBusy) return;
+  $("import-cover-input").value = "";
+  $("import-cover-input").dispatchEvent(new Event("change"));
+});
 nodes.fileInput.addEventListener("change", async (e) => {
-  let imported = 0, failed = 0;
-  for (const f of [...(e.target.files || [])]) {
-    if (!f.type.startsWith("audio/")) continue;
-    try { await addSong({ title: f.name.replace(/\.[^/.]+$/, ""), artist: "", source: "device", blob: f }); imported++; }
-    catch { failed++; }
+  if (deviceImportBusy) return;
+  const files = [...(e.target.files || [])];
+  if (!files.length) return;
+  const coverInput = $("import-cover-input"), status = $("device-import-status");
+  const selectedCover = coverInput.files?.[0];
+  let imported = 0, failed = 0, coverFailed = 0;
+  const failures = [];
+  deviceImportBusy = true; nodes.fileInput.disabled = true; coverInput.disabled = true;
+  $("clear-import-cover").disabled = true;
+  $("import-show-all").disabled = true;
+  status.setAttribute("aria-busy", "true"); refreshUpdateNotice();
+  try {
+    let customCover = null;
+    if (selectedCover) customCover = await localCover("", selectedCover);
+    void requestPersistence();
+    for (const [index, file] of files.entries()) {
+      status.textContent = `Importing ${index + 1} of ${files.length}: ${file.name}. Keep MusiMe open until it finishes.`;
+      // Give the browser a paint opportunity before each storage write.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      try {
+        if (!isLocalAudio(file)) {
+          const video = file.type.startsWith("video/") || /\.(mp4|mov|m4v|webm|avi|mkv)$/i.test(file.name);
+          throw new Error(!file.size ? "This file is empty" : video ? "Videos are not supported. Choose an MP3 or another audio file." : "Choose an audio file such as MP3");
+        }
+        let estimate;
+        try { estimate = await navigator.storage?.estimate?.(); } catch {}
+        if (estimate?.quota && estimate.quota - (estimate.usage || 0) < file.size + 1024 * 1024) throw new Error("Not enough storage. Free space on this device and try again.");
+        let tags;
+        try { tags = await readLocalTags(file); }
+        catch { tags = { title: file.name.replace(/\.[^.]+$/, ""), artist: "", cover: null }; }
+        // The File is stored directly, without reading/base64-encoding its audio.
+        const id = await addSong({ title: tags.title, artist: tags.artist, source: "device", blob: localAudioBlob(file) });
+        imported++;
+        try {
+          let cover = customCover;
+          if (!cover && tags.cover) { try { cover = await localCover(tags.title, tags.cover); } catch {} }
+          if (!cover) cover = await localCover(tags.title);
+          await saveArtwork(id, cover); rememberArtwork(id, cover); render();
+        } catch { coverFailed++; }
+      } catch (error) {
+        failed++;
+        if (failures.length < 3) failures.push(`${file.name}: ${error?.name === "QuotaExceededError" ? "Not enough storage. Free space and try again." : error?.message || "Could not save this file. Try again."}`);
+      }
+    }
+    status.textContent = `${imported} song${imported === 1 ? "" : "s"} imported to Home.${failed ? ` ${failed} failed. ${failures.join(" ")}` : ""}${coverFailed ? ` ${coverFailed} saved without a cover.` : ""}`;
+    showToast(failed ? `${imported} imported; ${failed} could not be saved. See Import for details.` : `Imported ${imported} song${imported === 1 ? "" : "s"}`);
+  } catch (error) {
+    status.textContent = error?.message || "Import failed. Try again.";
+    showToast("Import could not start. See Import for details.");
+  } finally {
+    nodes.fileInput.value = ""; nodes.fileInput.disabled = false; coverInput.disabled = false;
+    $("clear-import-cover").disabled = false;
+    $("import-show-all").disabled = false;
+    deviceImportBusy = false; status.setAttribute("aria-busy", "false"); refreshUpdateNotice();
   }
-  nodes.fileInput.value = "";
-  showToast(failed ? `${imported} imported; ${failed} could not be saved. Check device storage.` : `Imported ${imported} song${imported === 1 ? "" : "s"}`);
 });
 nodes.playlistForm.addEventListener("submit", (e) => { e.preventDefault(); const n = nodes.playlistForm.querySelector("input").value.trim(); if (!n) return; nodes.playlistForm.reset(); createPlaylist(n); });
 nodes.favoritesToggle.addEventListener("click", () => { favoritesOnly = !favoritesOnly; nodes.favoritesToggle.classList.toggle("active-fav", favoritesOnly); nodes.favoritesToggle.querySelector(".fav-icon").innerHTML = favoritesOnly ? "&#9829;" : "&#9825;"; renderSongs(); });
@@ -3922,12 +3995,12 @@ let pendingAppUpdate = false;
 function refreshUpdateNotice() {
   if (!pendingAppUpdate) return;
   $("app-update-banner").classList.remove("hidden");
-  const busy = isPlaying || queueBusy || !!previewingId;
+  const busy = isPlaying || queueBusy || !!previewingId || deviceImportBusy;
   $("apply-app-update").disabled = busy;
   $("app-update-text").textContent = busy ? "Update ready. Finish playback and downloads to update." : "A new MusiMe version is ready. Your downloads stay on this device.";
 }
 $("apply-app-update").addEventListener("click", () => {
-  if (isPlaying || queueBusy || previewingId) { refreshUpdateNotice(); return; }
+  if (isPlaying || queueBusy || previewingId || deviceImportBusy) { refreshUpdateNotice(); return; }
   savePlaybackState();
   location.reload();
 });

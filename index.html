@@ -13,7 +13,7 @@
     <!-- iOS home-screen icon MUST be PNG — SVG apple-touch-icons never load -->
     <link rel="apple-touch-icon" href="icons/icon-180.png" />
     <title>MusiMe</title>
-    <link rel="stylesheet" href="styles.css?v=2026.10.26.1" />
+    <link rel="stylesheet" href="styles.css?v=2026.11.06.2" />
   </head>
   <body>
 
@@ -190,10 +190,19 @@
         </section>
         <section class="settings-section">
           <h3>Import from device</h3>
+          <p class="hint">Choose downloaded MP3s or other audio from Files. Songs appear in Home and play offline. Large files need enough free storage; keep MusiMe open while importing.</p>
+          <label class="pill-btn fake-btn" for="import-cover-input">Choose cover (optional)</label>
+          <input id="import-cover-input" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" class="hidden" />
+          <button id="clear-import-cover" type="button" class="pill-btn hidden">Use automatic artwork</button>
+          <p id="import-cover-name" class="hint">Uses embedded artwork, or creates a cover automatically.</p>
           <label class="file-drop" for="file-input">
-            <input id="file-input" type="file" accept="audio/*" multiple />
-            <span>Tap to select audio files</span>
+            <!-- Avoid audio/*: iOS may map it to the video picker. -->
+            <input id="file-input" type="file" accept=".mp3,.m4a,.aac,.wav,.flac,.ogg,.opus,.aiff,.aif" multiple />
+            <span>Choose MP3s or other songs from Files</span>
           </label>
+          <label class="hint"><input id="import-show-all" type="checkbox" /> MP3 missing? Show all files</label>
+          <p class="hint">In Files, tap Browse → Downloads, On My iPhone, or iCloud Drive, then select your MP3s. Import supports audio files; videos are not supported.</p>
+          <p id="device-import-status" class="hint" role="status" aria-live="polite" aria-busy="false"></p>
         </section>
         <section class="settings-section hidden" id="cloud-sync-section">
           <h3>Cloud Sync</h3>
@@ -477,6 +486,6 @@
     <audio id="audio" preload="metadata"></audio>
     <aside id="toast" class="toast" role="status" aria-live="polite"></aside>
 
-    <script src="app.js?v=2026.10.26.1" type="module"></script>
+    <script src="app.js?v=2026.11.06.2" type="module"></script>
   </body>
 </html>
