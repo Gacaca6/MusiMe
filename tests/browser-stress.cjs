@@ -8,7 +8,7 @@ const pw = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root = path.resolve(__dirname, '..');
 const output = path.resolve(process.env.TEST_OUTPUT_DIR || path.join(root, 'test-results'));
 fs.mkdirSync(output, { recursive: true });
-const build = '2026.11.06.3';
+const build = '2026.11.11.1';
 const results = [];
 const browserResourceDiagnostics = [];
 let activeScenario = "";
@@ -138,6 +138,99 @@ async function submitSearch(page, query) {
 }
 async function searchSettled(page) { await page.waitForFunction(() => document.getElementById('search-results').getAttribute('aria-busy') === 'false'); }
 async function runFrontend() {
+  await check('video import: MP4 and iPhone-style MOV save only AAC audio with covers and offline playback', async () => {
+    const { context, page, errors } = await contextPage();
+    try {
+      await seed(page, [], { playlists: ['All songs'] });
+      const chromium = (process.env.TEST_BROWSER || 'chromium') === 'chromium';
+      if (chromium) {
+        await page.evaluate(() => navigator.serviceWorker.ready);
+        await context.setOffline(true);
+        await page.reload();
+        await page.waitForFunction(() => document.body.dataset.libraryReady === 'true');
+      }
+      await page.locator('[aria-label="Settings"]').click();
+      const picker = page.locator('#video-file-input');
+      for (const extension of ['mp4', 'mov']) {
+        const bytes = fs.readFileSync(path.join(root, `tests/fixtures/video-with-audio.${extension}`));
+        if (extension === 'mp4') {
+          const choosing = page.waitForEvent('filechooser');
+          await picker.click();
+          await (await choosing).setFiles(path.join(root, 'tests/fixtures/video-with-audio.mp4'));
+        } else {
+          await picker.setInputFiles({ name: 'Tone from mov.mov', mimeType: 'application/octet-stream', buffer: bytes });
+        }
+        await page.waitForFunction(() => document.getElementById('device-import-status').getAttribute('aria-busy') === 'false');
+        assert.equal(await page.locator('#device-import-status').textContent(), '1 song imported to Home.');
+      }
+      await page.locator('.video-import-option').scrollIntoViewIfNeeded();
+      await page.screenshot({ path: path.join(output, 'video-import-settings.png') });
+      await page.reload();
+      await page.waitForFunction(() => document.body.dataset.libraryReady === 'true');
+      const records = await page.evaluate(async () => {
+        const { BlobSource, Input, MP4 } = await import('/vendor/mediabunny-video-1.65.2.js');
+        const songs = JSON.parse(localStorage.getItem('musime-songs-meta'));
+        const db = await new Promise((resolve, reject) => {
+          const request = indexedDB.open('musime-db', 1);
+          request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+        });
+        const read = (id) => new Promise((resolve, reject) => {
+          const request = db.transaction('songs').objectStore('songs').get(id);
+          request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+        });
+        try {
+          return await Promise.all(songs.map(async (song) => {
+            const saved = await read(song.id);
+            const blob = saved instanceof Blob ? saved : new Blob([saved.data], { type: saved.type });
+            const input = new Input({ source: new BlobSource(blob), formats: [MP4] });
+            try {
+              const tracks = await input.getAudioTracks();
+              return { title: song.title, duration: song.duration, type: blob.type, cover: !!await read(`art-${song.id}`), videoTracks: (await input.getVideoTracks()).length, audioCodecs: await Promise.all(tracks.map((track) => track.getCodec())) };
+            } finally { input.dispose(); }
+          }));
+        } finally { db.close(); }
+      });
+      assert.deepEqual(records.map((record) => record.title).sort(), ['Tone from mov', 'video-with-audio']);
+      for (const record of records) {
+        assert.deepEqual(record.audioCodecs, ['aac']);
+        assert.equal(record.videoTracks, 0);
+        assert.equal(record.type, 'audio/mp4');
+        assert.equal(record.cover, true);
+        assert.ok(record.duration >= 3 && record.duration < 3.1);
+      }
+      if (chromium) {
+        await clickMode(page, 'songs');
+        await page.locator('.song-main').first().click();
+        await page.waitForFunction(() => !document.getElementById('audio').paused && document.getElementById('audio').currentTime > 0.2);
+      }
+      await noErrors(errors);
+    } finally { await context.close(); }
+  });
+  await check('video import: silent and damaged files leave the library intact; cancel and retry work', async () => {
+    const { context, page, errors } = await contextPage({ serviceWorkers: 'block' });
+    try {
+      await seed(page, [], { playlists: ['All songs'] });
+      await page.locator('[aria-label="Settings"]').click();
+      const picker = page.locator('#video-file-input');
+      const status = page.locator('#device-import-status');
+      await picker.setInputFiles(path.join(root, 'tests/fixtures/video-silent.mp4'));
+      await page.waitForFunction(() => document.getElementById('device-import-status').getAttribute('aria-busy') === 'false');
+      assert.match(await status.textContent(), /no audio track/);
+      await picker.setInputFiles({ name: 'Broken.mov', mimeType: 'video/quicktime', buffer: Buffer.from('invalid container') });
+      await page.waitForFunction(() => document.getElementById('device-import-status').textContent.includes('Could not read this video'));
+      const workerRoute = '**/video-import-worker.js?*';
+      await context.route(workerRoute, (route) => route.fulfill({ contentType: 'text/javascript', body: 'self.onmessage = () => {};' }));
+      await picker.setInputFiles(path.join(root, 'tests/fixtures/video-with-audio.mp4'));
+      await page.locator('#video-import-cancel').click();
+      assert.equal(await status.textContent(), 'Video import canceled.');
+      assert.equal(await page.locator('#songs .song').count(), 0);
+      await context.unroute(workerRoute);
+      await picker.setInputFiles(path.join(root, 'tests/fixtures/video-with-audio.mp4'));
+      await page.waitForFunction(() => document.getElementById('device-import-status').textContent === '1 song imported to Home.');
+      assert.equal(await page.locator('#songs .song').count(), 1);
+      await noErrors(errors);
+    } finally { await context.close(); }
+  });
   await check('custom cover: existing song photo changes persist offline and update player without restarting audio', async () => {
     const { context, page, errors } = await contextPage();
     try {
@@ -921,7 +1014,7 @@ async function runFrontend() {
         { name: 'Another.wav', mimeType: 'audio/wav', buffer: audio },
       ]);
       await page.waitForFunction(() => document.getElementById('device-import-status').textContent.includes('2 songs imported to Home. 3 failed.'));
-      assert.match(await page.locator('#device-import-status').textContent(), /Videos are not supported/);
+      assert.match(await page.locator('#device-import-status').textContent(), /Use Import audio from video/);
       await page.locator('#import-cover-input').setInputFiles({ name: 'cover.png', mimeType: 'image/png', buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a3ioAAAAASUVORK5CYII=', 'base64') });
       await page.locator('#file-input').setInputFiles({ name: 'Custom.wav', mimeType: 'audio/wav', buffer: audio });
       await page.waitForFunction(() => document.getElementById('device-import-status').textContent === '1 song imported to Home.');

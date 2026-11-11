@@ -430,6 +430,18 @@ select {
 .import-fallback { display: flex; align-items: center; gap: .5rem; padding: .5rem 0; font-size: .73rem; cursor: pointer; }
 .import-fallback input { accent-color: #d9b99a; width: 16px; height: 16px; }
 .import-footnote { font-size: .69rem; line-height: 1.65; color: #9f958e; }
+.video-import-option { margin: .7rem 0; padding: .75rem; border: 1px solid #6e5847; border-radius: 14px; background: #e9d2bb0b; }
+.video-import-picker { position: relative; display: flex; align-items: center; gap: .7rem; color: #fff5ec; cursor: pointer; }
+.video-import-picker:focus-within { outline: 2px solid #e9d2bb; outline-offset: 4px; border-radius: 8px; }
+.video-import-picker input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.video-import-picker strong, .video-import-picker small { display: block; }
+.video-import-picker strong { font-size: .85rem; }
+.video-import-picker small { margin-top: .25rem; color: #c7b6a8; font-size: .7rem; }
+.video-import-icon { flex: 0 0 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; background: #e9d2bb; color: #322820; font-size: .85rem; }
+.video-import-chevron { margin-left: auto; color: #ddbea0; font-size: 1.3rem; }
+.video-import-option .import-footnote { margin-top: .5rem; }
+.video-import-progress-row { display: flex; align-items: center; gap: .65rem; margin-top: .6rem; }
+.video-import-progress-row progress { flex: 1; min-width: 0; accent-color: #e9d2bb; }
 #device-import-status { overflow-wrap: anywhere; line-height: 1.6; }
 #device-import-status:not(:empty) { margin: .8rem 0; padding: .8rem; background: #ffffff09; border-radius: 10px; color: #e4c8ac; }
 #device-import-status[aria-busy="true"] { border-left: 3px solid #dec0a2; }

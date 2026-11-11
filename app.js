@@ -1,7 +1,7 @@
-import { normalizeSearch, searchMatch, rankSearchSongs, rankSearchArtists, dedupeSearchSongs, createSearchClient } from "./search-engine.js?v=2026.11.06.3";
-import { readLocalTags, isLocalAudio, localAudioBlob, localCover } from "./local-import.js?v=2026.11.06.3";
-import { userLyrics, lyricStamp } from "./lyrics-tools.js?v=2026.11.06.3";
-const APP_VERSION = "2026.11.06.3";
+import { normalizeSearch, searchMatch, rankSearchSongs, rankSearchArtists, dedupeSearchSongs, createSearchClient } from "./search-engine.js?v=2026.11.11.1";
+import { readLocalTags, isLocalAudio, localAudioBlob, localCover } from "./local-import.js?v=2026.11.11.1";
+import { userLyrics, lyricStamp } from "./lyrics-tools.js?v=2026.11.11.1";
+const APP_VERSION = "2026.11.11.1";
 const DB_NAME = "musime-db";
 const STORE_NAME = "songs";
 const SONGS_KEY = "musime-songs-meta";
@@ -3525,7 +3525,63 @@ nodes.urlForm.addEventListener("submit", async (e) => {
   try { showToast("Downloading..."); const blob = await fetchAudioBlob(url, () => {}); await addSong({ title, artist, source: "web", blob, srcUrl: url }); nodes.urlForm.reset(); showToast("Saved offline"); } catch { showToast("Could not download"); }
 });
 let deviceImportBusy = false;
+const videoFileInput = $("video-file-input");
+let videoImportController = null;
 let importCoverPreviewUrl = null;
+$("video-import-cancel").addEventListener("click", () => videoImportController?.abort());
+
+async function extractVideoAudio(file) {
+  const controller = new AbortController();
+  const progress = $("video-import-progress");
+  const row = $("video-import-progress-row");
+  let worker, timeout;
+  videoImportController = controller;
+  progress.removeAttribute("value");
+  row.classList.remove("hidden");
+  try {
+    worker = new Worker(new URL(`./video-import-worker.js?v=${APP_VERSION}`, import.meta.url), { type: "module" });
+    return await new Promise((resolve, reject) => {
+      const resetTimeout = () => {
+        clearTimeout(timeout);
+        timeout = setTimeout(() => reject(new Error("The video took too long to read. Try a shorter clip.")), 60000);
+      };
+      controller.signal.addEventListener("abort", () => reject(new DOMException("Video import canceled", "AbortError")), { once: true });
+      worker.onmessage = async ({ data }) => {
+        if (data.type === "read") {
+          const { id, start, end } = data;
+          if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start || end > file.size || end - start > 16 * 1024 ** 2) {
+            reject(new Error("This video has an unsupported file layout. Try a shorter clip."));
+            return;
+          }
+          resetTimeout();
+          try {
+            const buffer = await file.slice(start, end).arrayBuffer();
+            if (!controller.signal.aborted) worker.postMessage({ type: "read-result", id, buffer }, [buffer]);
+          } catch {
+            reject(new Error("Could not read the selected video. Download it to your device and try again."));
+          }
+        } else if (data.type === "progress") {
+          if (data.value !== null) progress.value = data.value;
+          resetTimeout();
+        } else if (data.type === "done") {
+          resolve({ blob: data.blob, duration: data.duration });
+        } else if (data.type === "error") {
+          reject(new Error(data.message));
+        }
+      };
+      const handleWorkerError = () => reject(new Error("Could not start video extraction. Reopen MusiMe and try again."));
+      worker.onerror = handleWorkerError;
+      worker.onmessageerror = handleWorkerError;
+      resetTimeout();
+      worker.postMessage({ type: "start", size: file.size });
+    });
+  } finally {
+    clearTimeout(timeout);
+    worker?.terminate();
+    videoImportController = null;
+    row.classList.add("hidden");
+  }
+}
 $("import-add-lyrics").addEventListener("click", () => openLyricsEditor($("import-add-lyrics").dataset.songId));
 const deviceAudioTypes = nodes.fileInput.accept;
 $("import-show-all").addEventListener("change", (e) => {
@@ -3546,16 +3602,17 @@ $("clear-import-cover").addEventListener("click", () => {
   $("import-cover-input").value = "";
   $("import-cover-input").dispatchEvent(new Event("change"));
 });
-nodes.fileInput.addEventListener("change", async (e) => {
+async function importDeviceFiles(e) {
   if (deviceImportBusy) return;
   const files = [...(e.target.files || [])];
   if (!files.length) return;
+  const fromVideo = e.target === videoFileInput;
   const coverInput = $("import-cover-input"), status = $("device-import-status");
   const selectedCover = coverInput.files?.[0];
   let imported = 0, failed = 0, coverFailed = 0;
   let lastImportedId = null;
   const failures = [];
-  deviceImportBusy = true; nodes.fileInput.disabled = true; coverInput.disabled = true;
+  deviceImportBusy = true; nodes.fileInput.disabled = true; videoFileInput.disabled = true; coverInput.disabled = true;
   $("import-add-lyrics").classList.add("hidden");
   $("clear-import-cover").disabled = true;
   $("import-show-all").disabled = true;
@@ -3565,22 +3622,26 @@ nodes.fileInput.addEventListener("change", async (e) => {
     if (selectedCover) customCover = await localCover("", selectedCover);
     void requestPersistence();
     for (const [index, file] of files.entries()) {
-      status.textContent = `Importing ${index + 1} of ${files.length}: ${file.name}. Keep MusiMe open until it finishes.`;
+      status.textContent = fromVideo ? `Extracting audio from ${file.name}…` : `Importing ${index + 1} of ${files.length}: ${file.name}. Keep MusiMe open until it finishes.`;
       // Give the browser a paint opportunity before each storage write.
       await new Promise((resolve) => setTimeout(resolve, 0));
       try {
-        if (!isLocalAudio(file)) {
+        if (!fromVideo && !isLocalAudio(file)) {
           const video = file.type.startsWith("video/") || /\.(mp4|mov|m4v|webm|avi|mkv)$/i.test(file.name);
-          throw new Error(!file.size ? "This file is empty" : video ? "Videos are not supported. Choose an MP3 or another audio file." : "Choose an audio file such as MP3");
+          throw new Error(!file.size ? "This file is empty" : video ? "Use Import audio from video for an MP4 or MOV." : "Choose an audio file such as MP3");
         }
+        const extracted = fromVideo ? await extractVideoAudio(file) : null;
+        const blob = extracted ? extracted.blob : localAudioBlob(file);
         let estimate;
         try { estimate = await navigator.storage?.estimate?.(); } catch {}
-        if (estimate?.quota && estimate.quota - (estimate.usage || 0) < file.size + 1024 * 1024) throw new Error("Not enough storage. Free space on this device and try again.");
-        let tags;
-        try { tags = await readLocalTags(file); }
-        catch { tags = { title: file.name.replace(/\.[^.]+$/, ""), artist: "", cover: null }; }
-        // The File is stored directly, without reading/base64-encoding its audio.
-        const id = await addSong({ title: tags.title, artist: tags.artist, source: "device", blob: localAudioBlob(file) });
+        if (estimate?.quota && estimate.quota - (estimate.usage || 0) < blob.size + 1024 * 1024) throw new Error("Not enough storage. Free space on this device and try again.");
+        let tags = { title: file.name.replace(/\.[^.]+$/, "") || "Video audio", artist: "", cover: null };
+        if (!fromVideo) {
+          try { tags = await readLocalTags(file); } catch {}
+        } else {
+          status.textContent = "Saving audio to Home…";
+        }
+        const id = await addSong({ title: tags.title, artist: tags.artist, source: "device", blob, duration: extracted?.duration || 0 });
         lastImportedId = id;
         imported++;
         try {
@@ -3590,6 +3651,10 @@ nodes.fileInput.addEventListener("change", async (e) => {
           await saveArtwork(id, cover); rememberArtwork(id, cover); render();
         } catch { coverFailed++; }
       } catch (error) {
+        if (fromVideo && error?.name === "AbortError") {
+          status.textContent = "Video import canceled.";
+          return;
+        }
         failed++;
         if (failures.length < 3) failures.push(`${file.name}: ${error?.name === "QuotaExceededError" ? "Not enough storage. Free space and try again." : error?.message || "Could not save this file. Try again."}`);
       }
@@ -3605,12 +3670,14 @@ nodes.fileInput.addEventListener("change", async (e) => {
     status.textContent = error?.message || "Import failed. Try again.";
     showToast("Import could not start. See Import for details.");
   } finally {
-    nodes.fileInput.value = ""; nodes.fileInput.disabled = false; coverInput.disabled = false;
+    e.target.value = ""; nodes.fileInput.disabled = false; videoFileInput.disabled = false; coverInput.disabled = false;
     $("clear-import-cover").disabled = false;
     $("import-show-all").disabled = false;
     deviceImportBusy = false; status.setAttribute("aria-busy", "false"); refreshUpdateNotice();
   }
-});
+}
+nodes.fileInput.addEventListener("change", importDeviceFiles);
+videoFileInput.addEventListener("change", importDeviceFiles);
 nodes.playlistForm.addEventListener("submit", (e) => { e.preventDefault(); const n = nodes.playlistForm.querySelector("input").value.trim(); if (!n) return; nodes.playlistForm.reset(); createPlaylist(n); });
 nodes.favoritesToggle.addEventListener("click", () => { favoritesOnly = !favoritesOnly; nodes.favoritesToggle.classList.toggle("active-fav", favoritesOnly); nodes.favoritesToggle.querySelector(".fav-icon").innerHTML = favoritesOnly ? "&#9829;" : "&#9825;"; renderSongs(); });
 nodes.renamePlaylistBtn.addEventListener("click", doRenamePlaylist);

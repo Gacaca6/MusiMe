@@ -13,7 +13,7 @@
     <!-- iOS home-screen icon MUST be PNG — SVG apple-touch-icons never load -->
     <link rel="apple-touch-icon" href="icons/icon-180.png" />
     <title>MusiMe</title>
-    <link rel="stylesheet" href="styles.css?v=2026.11.06.3" />
+    <link rel="stylesheet" href="styles.css?v=2026.11.11.1" />
   </head>
   <body>
 
@@ -208,7 +208,20 @@
             <span class="import-plus" aria-hidden="true">+</span><strong>Choose songs from Files</strong><span>MP3, M4A, WAV & more · Select multiple songs</span>
           </label>
           <label class="hint import-fallback"><input id="import-show-all" type="checkbox" /> MP3 missing? Show all files</label>
-          <p class="import-footnote">Find downloads in Files → Browse. Large imports need free storage; keep MusiMe open until they finish. Videos aren't supported.</p>
+          <div class="video-import-option">
+            <label class="video-import-picker" for="video-file-input">
+              <input id="video-file-input" type="file" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v" />
+              <span class="video-import-icon" aria-hidden="true">&#9654;</span>
+              <span><strong>Import audio from video</strong><small>MP4 or MOV with AAC audio</small></span>
+              <span class="video-import-chevron" aria-hidden="true">›</span>
+            </label>
+            <p class="import-footnote">MusiMe saves the soundtrack on this device. The video stays in Photos or Files.</p>
+            <div id="video-import-progress-row" class="video-import-progress-row hidden">
+              <progress id="video-import-progress" max="1" aria-label="Extracting audio"></progress>
+              <button id="video-import-cancel" class="pill-btn" type="button">Cancel</button>
+            </div>
+          </div>
+          <p class="import-footnote">Find downloads in Files → Browse. Keep MusiMe open until the import finishes.</p>
           <p id="device-import-status" class="hint" role="status" aria-live="polite" aria-busy="false"></p>
           <button id="import-add-lyrics" type="button" class="pill-btn wide hidden">Add lyrics to your song</button>
           <div class="import-lyrics-tip"><span aria-hidden="true">≡</span><p><strong>Have the words?</strong>Open any song's ··· menu → Add / edit lyrics. Paste once. Keep them offline.</p></div>
@@ -535,6 +548,6 @@
     <audio id="audio" preload="metadata"></audio>
     <aside id="toast" class="toast" role="status" aria-live="polite"></aside>
 
-    <script src="app.js?v=2026.11.06.3" type="module"></script>
+    <script src="app.js?v=2026.11.11.1" type="module"></script>
   </body>
 </html>
