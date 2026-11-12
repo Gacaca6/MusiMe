@@ -1244,117 +1244,37 @@ img.artwork-unavailable { visibility: hidden; }
 .search-artists-compact .search-artist strong { width: auto; flex: 1; text-align: left; }
 .search-artists-compact .search-artist > span:last-child { display: none; }
 
-/* ═══════════════ YOUTUBE → MP3 SECTION ═══════════════ */
-.yt-mp3-section {
+
+.youtube-link-section {
   padding: 1rem;
   border: 1px solid #51463f;
   border-radius: 16px;
   background: linear-gradient(145deg, #2a211e, #202022 60%);
 }
-.yt-mp3-section h3 {
+.youtube-link-section h3 {
   text-transform: none;
   letter-spacing: -.03em;
   font-size: 1.15rem;
   color: #f3d1bc;
-  margin-bottom: 0.3rem;
+  margin-bottom: .4rem;
 }
-.yt-mp3-form { display: grid; gap: 0.5rem; }
-.yt-mp3-input-row {
-  display: flex;
-  gap: 0.5rem;
-  align-items: stretch;
+.youtube-link-section > .hint { line-height: 1.5; }
+.youtube-link-form { margin-top: .75rem; grid-template-columns: minmax(0, 1fr) auto; }
+.youtube-link-form input { min-width: 0; font-size: 16px; }
+.youtube-link-form button:disabled { opacity: .6; }
+.youtube-link-status:not(:empty) { margin: .6rem 0; color: #e9c9a9; }
+.youtube-import-link {
+  display: block;
+  margin-top: .65rem;
+  padding: .3rem 0;
+  border: 0;
+  background: transparent;
+  color: #e9c9a9;
+  font: inherit;
+  font-size: .8rem;
+  text-align: left;
+  cursor: pointer;
 }
-.yt-mp3-input-row input {
-  flex: 1;
-  min-width: 0;
-  padding: 0.65rem 0.8rem;
-  border: 1px solid #6e5847;
-  border-radius: 10px;
-  background: #ffffff0a;
-  color: var(--text);
-  font-size: 0.88rem;
-  font-family: inherit;
-  outline: none;
-  transition: border-color 150ms;
-}
-.yt-mp3-input-row input:focus { border-color: var(--accent); }
-.yt-mp3-input-row input::placeholder { color: #9f958e; }
-.yt-mp3-input-row .pill-btn { flex-shrink: 0; white-space: nowrap; }
-.yt-mp3-form input:not([type="submit"]):not(.yt-mp3-input-row input) {
-  width: 100%;
-  padding: 0.55rem 0.8rem;
-  border: 1px solid #5c5046;
-  border-radius: 10px;
-  background: #ffffff0a;
-  color: var(--text);
-  font-size: 0.85rem;
-  font-family: inherit;
-  outline: none;
-  transition: border-color 150ms;
-}
-.yt-mp3-form input:not([type="submit"]):not(.yt-mp3-input-row input):focus { border-color: var(--accent); }
-.yt-mp3-form input:not([type="submit"]):not(.yt-mp3-input-row input)::placeholder { color: #9f958e; }
-
-/* Loading / error / success status box */
-.yt-mp3-status {
-  margin-top: 0.65rem;
-  padding: 0.7rem 0.85rem;
-  border-radius: 10px;
-  font-size: 0.82rem;
-  line-height: 1.55;
-  overflow-wrap: anywhere;
-  display: flex;
-  align-items: center;
-  gap: 0.55rem;
-}
-.yt-mp3-status.loading {
-  background: rgba(229,194,170,0.1);
-  border: 1px solid rgba(229,194,170,0.25);
-  color: #e5c2aa;
-}
-.yt-mp3-status.error {
-  background: rgba(255,107,107,0.1);
-  border: 1px solid rgba(255,107,107,0.25);
-  color: #ff8a8a;
-}
-.yt-mp3-status.success {
-  background: rgba(0,206,201,0.1);
-  border: 1px solid rgba(0,206,201,0.25);
-  color: #5ae5e0;
-}
-
-/* Spinner */
-.yt-spinner {
-  width: 16px; height: 16px; flex-shrink: 0;
-  border: 2px solid rgba(229,194,170,0.25);
-  border-top-color: #e5c2aa;
-  border-radius: 50%;
-  animation: ytSpin 0.7s linear infinite;
-}
-@keyframes ytSpin { to { transform: rotate(360deg); } }
-
-/* Disabled state while converting */
-.yt-mp3-form.busy input,
-.yt-mp3-form.busy button { opacity: 0.55; pointer-events: none; }
-.yt-mp3-form.busy .yt-mp3-input-row .pill-btn {
-  opacity: 1;
-  pointer-events: none;
-  position: relative;
-  color: transparent;
-}
-.yt-mp3-form.busy .yt-mp3-input-row .pill-btn::after {
-  content: "";
-  position: absolute;
-  top: 50%; left: 50%;
-  width: 14px; height: 14px;
-  margin: -7px 0 0 -7px;
-  border: 2px solid rgba(33,26,22,0.3);
-  border-top-color: #211a16;
-  border-radius: 50%;
-  animation: ytSpin 0.7s linear infinite;
-}
-
 @media (max-width: 360px) {
-  .yt-mp3-input-row { flex-direction: column; }
-  .yt-mp3-input-row .pill-btn { width: 100%; text-align: center; }
+  .youtube-link-form { grid-template-columns: 1fr; }
 }
