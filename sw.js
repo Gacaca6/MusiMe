@@ -1,6 +1,6 @@
-const APP_VERSION = "2026.11.11.1";
+const APP_VERSION = "2026.11.12.1";
 const CACHE_PREFIX = "musime-static-";
-const CACHE_NAME = `${CACHE_PREFIX}v27-${APP_VERSION}`;
+const CACHE_NAME = `${CACHE_PREFIX}v28-${APP_VERSION}`;
 const STATIC_ASSETS = [
   "./", "./index.html", `./styles.css?v=${APP_VERSION}`, `./app.js?v=${APP_VERSION}`, `./search-engine.js?v=${APP_VERSION}`, `./local-import.js?v=${APP_VERSION}`, `./lyrics-tools.js?v=${APP_VERSION}`,
   `./video-import-worker.js?v=${APP_VERSION}`, "./vendor/mediabunny-video-1.65.2.js",

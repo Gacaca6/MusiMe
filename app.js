@@ -1,7 +1,7 @@
 import { normalizeSearch, searchMatch, rankSearchSongs, rankSearchArtists, dedupeSearchSongs, createSearchClient } from "./search-engine.js?v=2026.11.11.1";
 import { readLocalTags, isLocalAudio, localAudioBlob, localCover } from "./local-import.js?v=2026.11.11.1";
 import { userLyrics, lyricStamp } from "./lyrics-tools.js?v=2026.11.11.1";
-const APP_VERSION = "2026.11.11.1";
+const APP_VERSION = "2026.11.12.1";
 const DB_NAME = "musime-db";
 const STORE_NAME = "songs";
 const SONGS_KEY = "musime-songs-meta";
@@ -177,6 +177,12 @@ const nodes = {
   songUrl: $("song-url"),
   songTitle: $("song-title"),
   songArtist: $("song-artist"),
+  ytMp3Form: $("yt-mp3-form"),
+  ytUrl: $("yt-url"),
+  ytTitle: $("yt-title"),
+  ytArtist: $("yt-artist"),
+  ytMp3Btn: $("yt-mp3-btn"),
+  ytMp3Status: $("yt-mp3-status"),
   renamePlaylist: $("rename-playlist"),
   renamePlaylistBtn: $("rename-playlist-btn"),
   deletePlaylistBtn: $("delete-playlist-btn"),
@@ -3524,6 +3530,95 @@ nodes.urlForm.addEventListener("submit", async (e) => {
   e.preventDefault(); const url = nodes.songUrl.value.trim(); const title = nodes.songTitle.value.trim(); const artist = nodes.songArtist.value.trim();
   try { showToast("Downloading..."); const blob = await fetchAudioBlob(url, () => {}); await addSong({ title, artist, source: "web", blob, srcUrl: url }); nodes.urlForm.reset(); showToast("Saved offline"); } catch { showToast("Could not download"); }
 });
+
+/* ══════════════ YOUTUBE → MP3 DOWNLOAD ══════════════
+   Paste a YouTube link → the Vercel serverless function (/api/youtube-mp3)
+   calls a RapidAPI YouTube-to-MP3 service and returns a direct .mp3 URL.
+   We then fetch that URL as a Blob and save it into the library via the
+   same addSong() pipeline used everywhere else — fully offline after that. */
+function setYtStatus(type, message) {
+  const el = nodes.ytMp3Status;
+  if (!el) return;
+  el.className = "yt-mp3-status " + type;
+  el.innerHTML = type === "loading"
+    ? '<span class="yt-spinner"></span>' + escapeHtml(message)
+    : escapeHtml(message);
+}
+function clearYtStatus() {
+  if (!nodes.ytMp3Status) return;
+  nodes.ytMp3Status.className = "yt-mp3-status hidden";
+  nodes.ytMp3Status.textContent = "";
+}
+
+nodes.ytMp3Form?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const ytUrl = nodes.ytUrl.value.trim();
+  if (!ytUrl) { setYtStatus("error", "Paste a YouTube link first."); return; }
+
+  // Basic YouTube URL validation on the client side
+  if (!/youtube\.com|youtu\.be|youtube-nocookie\.com/i.test(ytUrl) && !/^[a-zA-Z0-9_-]{11}$/.test(ytUrl)) {
+    setYtStatus("error", "That doesn't look like a YouTube link. Try a URL from youtube.com or youtu.be.");
+    return;
+  }
+
+  // Enter loading state
+  nodes.ytMp3Form.classList.add("busy");
+  setYtStatus("loading", "Converting video to MP3…");
+
+  try {
+    // Step 1: Call our serverless function to get the direct MP3 download URL
+    const apiRes = await fetch("/api/youtube-mp3", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: ytUrl }),
+    });
+
+    const data = await apiRes.json().catch(() => ({}));
+
+    if (!apiRes.ok || !data.success) {
+      const msg = data.error || `Conversion failed (HTTP ${apiRes.status}). Try a different video.`;
+      setYtStatus("error", msg);
+      return;
+    }
+
+    // Step 2: Auto-fill title if the API returned one and the field is empty
+    const title = nodes.ytTitle.value.trim() || data.title || "YouTube audio";
+    const artist = nodes.ytArtist.value.trim() || "";
+
+    setYtStatus("loading", "Downloading MP3 to your library…");
+
+    // Step 3: Fetch the actual MP3 file from the direct URL returned by the API.
+    // This goes through fetchAudioBlob which handles progress, mime sniffing,
+    // and the 30s timeout — same function used for all audio downloads in MusiMe.
+    const blob = await fetchAudioBlob(data.downloadUrl, () => {});
+
+    // Step 4: Save into the library via the same pipeline as everything else
+    await addSong({
+      title,
+      artist,
+      source: "youtube",
+      blob,
+      srcUrl: data.downloadUrl,
+      artwork: data.thumbnail || "",
+    });
+
+    // Reset the form and show success
+    nodes.ytMp3Form.reset();
+    nodes.ytMp3Form.classList.remove("busy");
+    setYtStatus("success", `Saved "${title}" to your library.`);
+    setTimeout(() => clearYtStatus(), 4000);
+  } catch (err) {
+    nodes.ytMp3Form.classList.remove("busy");
+    const msg = err?.message || "Could not download the MP3. The video may be private, age-restricted, or too long.";
+    setYtStatus("error", msg);
+  }
+});
+
+// Clear error message when the user starts editing the URL field again
+nodes.ytUrl?.addEventListener("input", () => {
+  if (nodes.ytMp3Status.classList.contains("error")) clearYtStatus();
+});
+
 let deviceImportBusy = false;
 const videoFileInput = $("video-file-input");
 let videoImportController = null;

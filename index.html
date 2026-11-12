@@ -13,7 +13,7 @@
     <!-- iOS home-screen icon MUST be PNG — SVG apple-touch-icons never load -->
     <link rel="apple-touch-icon" href="icons/icon-180.png" />
     <title>MusiMe</title>
-    <link rel="stylesheet" href="styles.css?v=2026.11.11.1" />
+    <link rel="stylesheet" href="styles.css?v=2026.11.12.1" />
   </head>
   <body>
 
@@ -187,6 +187,19 @@
             <a href="https://afrocharts.com" target="_blank" rel="noopener" style="color:var(--accent);">afrocharts.com</a>
             also work here.
           </p>
+        </section>
+        <section id="yt-mp3-section" class="settings-section yt-mp3-section">
+          <h3>YouTube to MP3</h3>
+          <p class="hint" style="margin-bottom:0.6rem">Paste any YouTube link and MusiMe fetches the MP3 for you — no leaving the app.</p>
+          <form id="yt-mp3-form" class="yt-mp3-form" action="javascript:void(0)">
+            <div class="yt-mp3-input-row">
+              <input id="yt-url" type="text" placeholder="https://youtube.com/watch?v=… or youtu.be/…" autocomplete="off" />
+              <button id="yt-mp3-btn" class="pill-btn accent" type="submit">Convert</button>
+            </div>
+            <input id="yt-title" type="text" placeholder="Song title (auto-filled if possible)" />
+            <input id="yt-artist" type="text" placeholder="Artist (optional)" />
+          </form>
+          <div id="yt-mp3-status" class="yt-mp3-status hidden" role="status" aria-live="polite"></div>
         </section>
         <section id="device-import" class="settings-section device-import" aria-labelledby="device-import-title">
           <div class="import-heading"><span class="import-symbol" aria-hidden="true">♫</span><span class="import-eyebrow">YOUR OFFLINE COLLECTION</span></div>
@@ -548,6 +561,6 @@
     <audio id="audio" preload="metadata"></audio>
     <aside id="toast" class="toast" role="status" aria-live="polite"></aside>
 
-    <script src="app.js?v=2026.11.11.1" type="module"></script>
+    <script src="app.js?v=2026.11.12.1" type="module"></script>
   </body>
 </html>
