@@ -8,7 +8,7 @@ const pw = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root = path.resolve(__dirname, '..');
 const output = path.resolve(process.env.TEST_OUTPUT_DIR || path.join(root, 'test-results'));
 fs.mkdirSync(output, { recursive: true });
-const build = '2026.11.12.2';
+const build = '2026.11.12.3';
 const results = [];
 const browserResourceDiagnostics = [];
 let activeScenario = "";
@@ -138,55 +138,6 @@ async function submitSearch(page, query) {
 }
 async function searchSettled(page) { await page.waitForFunction(() => document.getElementById('search-results').getAttribute('aria-busy') === 'false'); }
 async function runFrontend() {
-  await check('YouTube link: validates the host, finds a catalog recording, and saves the chosen song', async () => {
-    const { context, page, errors } = await contextPage({ serviceWorkers: 'block' });
-    try {
-      const lookups = [];
-      await context.route('https://www.youtube.com/oembed?*', (route) => {
-        const url = new URL(route.request().url());
-        lookups.push(url.searchParams.get('url'));
-        return route.fulfill({ headers: { 'Access-Control-Allow-Origin': '*' }, json: { title: 'Fixture Song (Official Music Video)' } });
-      });
-      await searchMock(context, (url) => {
-        if (url.pathname.endsWith('/search/songs')) return { json: { data: { total: 1, results: [searchSong('yt-catalog', 'Fixture Song')] } } };
-      });
-      await seed(page, []);
-      await page.locator('[aria-label="Settings"]').click();
-      const input = page.locator('#yt-url');
-      const submit = page.locator('#youtube-find');
-      await input.fill('https://www.youtube.com.evil.example/watch?v=jfKfPfyJRdk');
-      await submit.click();
-      assert.match(await page.locator('#youtube-link-status').textContent(), /single YouTube video/);
-      assert.deepEqual(lookups, []);
-      await input.fill('https://youtu.be/jfKfPfyJRdk?si=example');
-      await submit.click();
-      await page.locator('#view-search.active').waitFor();
-      await searchSettled(page);
-      assert.deepEqual(lookups, ['https://www.youtube.com/watch?v=jfKfPfyJRdk']);
-      assert.equal(await page.locator('#search-query').inputValue(), 'Fixture Song');
-      assert.equal(await page.locator('#songs .song').count(), 0);
-      const row = page.locator('.result-item').filter({ hasText: 'Fixture Song' });
-      await row.locator('.add-btn').click();
-      await page.waitForFunction(() => JSON.parse(localStorage.getItem('musime-songs-meta') || '[]').some((song) => song.saavnId === 'yt-catalog'));
-      await noErrors(errors);
-    } finally { await context.close(); }
-  });
-  await check('YouTube link: unavailable metadata offers manual search', async () => {
-    const { context, page, errors } = await contextPage({ serviceWorkers: 'block' });
-    try {
-      await context.route('https://www.youtube.com/oembed?*', (route) => route.fulfill({ status: 404, headers: { 'Access-Control-Allow-Origin': '*' } }));
-      await seed(page, []);
-      await page.locator('[aria-label="Settings"]').click();
-      await page.locator('#yt-url').fill('https://www.youtube.com/shorts/jfKfPfyJRdk');
-      await page.locator('#youtube-find').click();
-      await page.locator('#youtube-search-manually').waitFor();
-      assert.equal(await page.locator('#youtube-find').isEnabled(), true);
-      await page.locator('#youtube-search-manually').click();
-      await page.locator('#view-search.active').waitFor();
-      assert.equal(await page.locator('#search-query').inputValue(), '');
-      await noErrors(errors);
-    } finally { await context.close(); }
-  });
   await check('video import: MP4 and iPhone-style MOV save only AAC audio with covers and offline playback', async () => {
     const { context, page, errors } = await contextPage();
     try {

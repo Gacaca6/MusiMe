@@ -1,7 +1,7 @@
-import { normalizeSearch, searchMatch, rankSearchSongs, rankSearchArtists, dedupeSearchSongs, createSearchClient } from "./search-engine.js?v=2026.11.12.2";
-import { readLocalTags, isLocalAudio, localAudioBlob, localCover } from "./local-import.js?v=2026.11.12.2";
-import { userLyrics, lyricStamp } from "./lyrics-tools.js?v=2026.11.12.2";
-const APP_VERSION = "2026.11.12.2";
+import { normalizeSearch, searchMatch, rankSearchSongs, rankSearchArtists, dedupeSearchSongs, createSearchClient } from "./search-engine.js?v=2026.11.12.3";
+import { readLocalTags, isLocalAudio, localAudioBlob, localCover } from "./local-import.js?v=2026.11.12.3";
+import { userLyrics, lyricStamp } from "./lyrics-tools.js?v=2026.11.12.3";
+const APP_VERSION = "2026.11.12.3";
 const DB_NAME = "musime-db";
 const STORE_NAME = "songs";
 const SONGS_KEY = "musime-songs-meta";
@@ -3523,105 +3523,6 @@ nodes.searchQuery.addEventListener("input", () => {
 nodes.urlForm.addEventListener("submit", async (e) => {
   e.preventDefault(); const url = nodes.songUrl.value.trim(); const title = nodes.songTitle.value.trim(); const artist = nodes.songArtist.value.trim();
   try { showToast("Downloading..."); const blob = await fetchAudioBlob(url, () => {}); await addSong({ title, artist, source: "web", blob, srcUrl: url }); nodes.urlForm.reset(); showToast("Saved offline"); } catch { showToast("Could not download"); }
-});
-
-// YouTube's public oEmbed endpoint provides the video title for catalog search.
-function youtubeVideoId(value) {
-  const input = value.trim();
-  const validId = /^[\w-]{11}$/;
-  if (validId.test(input)) return input;
-  try {
-    const url = new URL(/^https?:\/\//i.test(input) ? input : "https://" + input);
-    if (url.username || url.password || url.port) return "";
-    const [kind, pathId] = url.pathname.split("/").filter(Boolean);
-    let id;
-    if (url.hostname === "youtu.be") {
-      id = kind;
-    } else if (["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "www.youtube-nocookie.com", "youtube-nocookie.com"].includes(url.hostname)) {
-      if (kind === "watch") id = url.searchParams.get("v");
-      if (["shorts", "live", "embed"].includes(kind)) id = pathId;
-    }
-    return validId.test(id || "") ? id : "";
-  } catch {
-    return "";
-  }
-}
-
-const youtubeForm = $("youtube-link-form");
-const youtubeLinkInput = $("yt-url");
-const youtubeFind = $("youtube-find");
-const youtubeStatus = $("youtube-link-status");
-const youtubeManualSearch = $("youtube-search-manually");
-let youtubeLookup = null;
-
-youtubeLinkInput.addEventListener("input", () => {
-  youtubeLookup?.abort();
-  youtubeLookup = null;
-  youtubeFind.disabled = false;
-  youtubeStatus.textContent = "";
-  youtubeManualSearch.classList.add("hidden");
-});
-
-youtubeForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  if (youtubeLookup) return;
-  youtubeManualSearch.classList.add("hidden");
-  const id = youtubeVideoId(youtubeLinkInput.value);
-  if (!id) {
-    youtubeStatus.textContent = "Paste a link to a single YouTube video.";
-    return;
-  }
-  if (!navigator.onLine) {
-    youtubeStatus.textContent = "Connect to the internet to look up the video.";
-    return;
-  }
-
-  const controller = new AbortController();
-  youtubeLookup = controller;
-  youtubeFind.disabled = true;
-  youtubeStatus.textContent = "Finding the video title…";
-  const timer = setTimeout(() => controller.abort(), 8000);
-  try {
-    const videoUrl = "https://www.youtube.com/watch?v=" + id;
-    const metadata = new URL("https://www.youtube.com/oembed");
-    metadata.searchParams.set("url", videoUrl);
-    metadata.searchParams.set("format", "json");
-    const response = await fetch(metadata, { signal: controller.signal, credentials: "omit" });
-    if (!response.ok) throw new Error("Video title unavailable");
-    const data = await response.json();
-    const title = typeof data.title === "string"
-      ? data.title.replace(/\s*[(\[]\s*official\s+(?:music\s+)?(?:video|audio)\s*[)\]]\s*$/i, "").trim().slice(0, 150)
-      : "";
-    if (!title) throw new Error("Video title unavailable");
-    if (youtubeLookup !== controller) return;
-
-    youtubeStatus.textContent = "Video found. Preview a recording in Search before downloading.";
-    if (!$("view-settings").classList.contains("active")) return;
-    nodes.searchQuery.value = title;
-    switchTab("view-search");
-    setSearchMode("songs");
-  } catch {
-    if (youtubeLookup !== controller) return;
-    youtubeStatus.textContent = "Couldn’t read the video title. Search by song name or import the video file below.";
-    youtubeManualSearch.classList.remove("hidden");
-  } finally {
-    clearTimeout(timer);
-    if (youtubeLookup === controller) {
-      youtubeLookup = null;
-      youtubeFind.disabled = false;
-    }
-  }
-});
-
-youtubeManualSearch.addEventListener("click", () => {
-  nodes.searchQuery.value = "";
-  switchTab("view-search");
-  setSearchMode("songs");
-  nodes.searchQuery.focus();
-});
-
-$("youtube-import-file").addEventListener("click", () => {
-  document.querySelector(".video-import-option").scrollIntoView({ block: "center" });
 });
 
 let deviceImportBusy = false;

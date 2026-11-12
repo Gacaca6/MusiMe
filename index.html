@@ -13,7 +13,7 @@
     <!-- iOS home-screen icon MUST be PNG — SVG apple-touch-icons never load -->
     <link rel="apple-touch-icon" href="icons/icon-180.png" />
     <title>MusiMe</title>
-    <link rel="stylesheet" href="styles.css?v=2026.11.12.2" />
+    <link rel="stylesheet" href="styles.css?v=2026.11.12.3" />
   </head>
   <body>
 
@@ -179,17 +179,6 @@
             <button class="pill-btn accent wide" type="submit">Download &amp; Save</button>
           </form>
           <p class="hint" style="margin-top:0.6rem">Use a direct link to an audio file you can download.</p>
-        </section>
-        <section class="settings-section youtube-link-section" aria-labelledby="youtube-link-title">
-          <h3 id="youtube-link-title">Find a song from YouTube</h3>
-          <p class="hint">Paste a video link to look for a matching recording in MusiMe. Preview the result before downloading.</p>
-          <form id="youtube-link-form" class="settings-form youtube-link-form">
-            <input id="yt-url" type="text" inputmode="url" aria-label="YouTube video link" placeholder="Paste a YouTube video link" autocomplete="off" spellcheck="false" maxlength="2048" required />
-            <button id="youtube-find" class="pill-btn accent" type="submit">Find song</button>
-          </form>
-          <p id="youtube-link-status" class="hint youtube-link-status" role="status"></p>
-          <button id="youtube-search-manually" class="pill-btn hidden" type="button">Search by song name</button>
-          <button id="youtube-import-file" class="youtube-import-link" type="button">Have the video file? Import its audio</button>
         </section>
         <section id="device-import" class="settings-section device-import" aria-labelledby="device-import-title">
           <div class="import-heading"><span class="import-symbol" aria-hidden="true">♫</span><span class="import-eyebrow">YOUR OFFLINE COLLECTION</span></div>
@@ -551,6 +540,6 @@
     <audio id="audio" preload="metadata"></audio>
     <aside id="toast" class="toast" role="status" aria-live="polite"></aside>
 
-    <script src="app.js?v=2026.11.12.2" type="module"></script>
+    <script src="app.js?v=2026.11.12.3" type="module"></script>
   </body>
 </html>

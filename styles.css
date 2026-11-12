@@ -1243,38 +1243,3 @@ img.artwork-unavailable { visibility: hidden; }
 .search-artists-compact .search-artist img, .search-artists-compact .search-artist-placeholder { width: 32px; height: 32px; flex-shrink: 0; font-size: 18px; }
 .search-artists-compact .search-artist strong { width: auto; flex: 1; text-align: left; }
 .search-artists-compact .search-artist > span:last-child { display: none; }
-
-
-.youtube-link-section {
-  padding: 1rem;
-  border: 1px solid #51463f;
-  border-radius: 16px;
-  background: linear-gradient(145deg, #2a211e, #202022 60%);
-}
-.youtube-link-section h3 {
-  text-transform: none;
-  letter-spacing: -.03em;
-  font-size: 1.15rem;
-  color: #f3d1bc;
-  margin-bottom: .4rem;
-}
-.youtube-link-section > .hint { line-height: 1.5; }
-.youtube-link-form { margin-top: .75rem; grid-template-columns: minmax(0, 1fr) auto; }
-.youtube-link-form input { min-width: 0; font-size: 16px; }
-.youtube-link-form button:disabled { opacity: .6; }
-.youtube-link-status:not(:empty) { margin: .6rem 0; color: #e9c9a9; }
-.youtube-import-link {
-  display: block;
-  margin-top: .65rem;
-  padding: .3rem 0;
-  border: 0;
-  background: transparent;
-  color: #e9c9a9;
-  font: inherit;
-  font-size: .8rem;
-  text-align: left;
-  cursor: pointer;
-}
-@media (max-width: 360px) {
-  .youtube-link-form { grid-template-columns: 1fr; }
-}

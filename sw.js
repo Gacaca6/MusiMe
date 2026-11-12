@@ -1,4 +1,4 @@
-const APP_VERSION = "2026.11.12.2";
+const APP_VERSION = "2026.11.12.3";
 const CACHE_PREFIX = "musime-static-";
 const CACHE_NAME = `${CACHE_PREFIX}v28-${APP_VERSION}`;
 const STATIC_ASSETS = [
